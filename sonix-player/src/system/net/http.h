@@ -170,6 +170,11 @@ typedef struct {
 // fails, or the status is not 200.
 bool http_stream_open(http_stream_t *st, const char *url, int timeout_secs);
 
+// Opens a finite binary response using a POST form. Does not follow redirects:
+// the caller must supply the final endpoint to avoid forwarding credentials.
+// HTTP/1.0 requests require an unchunked, connection-close response.
+bool http_stream_post_open(http_stream_t *st, const char *url, const char *form, int timeout_secs);
+
 // Reads up to `len` bytes of *audio* into buf: any ICY metadata blocks in the
 // way are consumed and parsed out, never handed to the caller. Returns the
 // number of bytes read, 0 at end of stream, -1 on error.

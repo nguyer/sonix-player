@@ -28,6 +28,7 @@
 #include "src/system/streaming/podcastcache.h"
 #include "src/system/streaming/podcastdl.h"
 #include "src/system/streaming/tidalcache.h"
+#include "src/system/streaming/subsonic.h"
 #include "src/system/device/adb.h"
 #include "src/system/library/library.h"
 #include "src/system/remote/airplay.h"
@@ -641,7 +642,7 @@ static bool wifi_in_use(void) {
 		   wifitransfer_get_enabled() || qobuzcache_downloading_id() > 0 ||
 		   qobuzcache_network_wanted() || tidalcache_downloading_id() > 0 || tidalcache_network_wanted() ||
 		   podcastcache_downloading_id() > 0 || podcastcache_network_wanted() || podcastdl_busy() ||
-		   lastfm_network_wanted() || ota_busy();
+		   lastfm_network_wanted() || subsonic_download_busy() || ota_busy();
 }
 
 // Pushes the next suspend attempt out by the anti-hammer delay. A radio that has
@@ -698,7 +699,7 @@ static bool player_is_busy(bool playing, uint32_t input_idle) {
 		   audiobookdb_scan_running() || wifitransfer_running() || dlna_running() || airplay_running() ||
 		   sonixlink_is_connected() || // a phone driving the player, not a switch left on
 		   qobuzcache_downloading_id() > 0 || tidalcache_downloading_id() > 0 || podcastcache_downloading_id() > 0 ||
-		   ota_busy(); // a firmware update being fetched
+		   subsonic_download_busy() || ota_busy(); // a song or firmware update being fetched
 }
 
 static void park_bluetooth_now(void) {

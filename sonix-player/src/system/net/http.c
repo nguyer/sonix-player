@@ -868,7 +868,7 @@ static conn_t stream_conn(http_stream_t *st) {
 }
 
 static bool stream_open_once(http_stream_t *st, const char *url, int timeout_secs, int *status_out,
-							 char *location, size_t location_size) {
+							 char *location, size_t location_size, const char *form) {
 	url_t u;
 	if (!url_parse(url, &u)) {
 		return false;
@@ -890,17 +890,25 @@ static bool stream_open_once(http_stream_t *st, const char *url, int timeout_sec
 	char host_header[300];
 	host_header_value(&u, host_header, sizeof(host_header));
 
-	char request[2600];
+	char body_headers[128] = "";
+	if (form) snprintf(body_headers, sizeof(body_headers),
+		"Content-Type: application/x-www-form-urlencoded\r\nContent-Length: %zu\r\n", strlen(form));
+	char request[4096];
 	int n = snprintf(request, sizeof(request),
-					 "GET %s HTTP/1.0\r\n" // 1.0: no chunking, no keep-alive to argue about
+					 "%s %s HTTP/1.0\r\n" // 1.0: no chunking, no keep-alive to argue about
 					 "Host: %s\r\n"
 					 "User-Agent: " HTTP_USER_AGENT "\r\n"
-					 "Icy-MetaData: 1\r\n"
+					 "%s"
 					 "Accept: */*\r\n"
-					 "\r\n",
-					 u.path, host_header);
+					 "%s\r\n",
+					 form ? "POST" : "GET", u.path, host_header,
+					 form ? "" : "Icy-MetaData: 1\r\n", body_headers);
 	// As above: snprintf returns what it would have written, not what it did.
 	if (n <= 0 || (size_t)n >= sizeof(request) || !conn_write_all(&conn, request, (size_t)n)) {
+		conn_close(&conn);
+		return false;
+	}
+	if (form && !conn_write_all(&conn, form, strlen(form))) {
 		conn_close(&conn);
 		return false;
 	}
@@ -963,7 +971,7 @@ bool http_stream_open(http_stream_t *st, const char *url, int timeout_secs) {
 	for (int hop = 0; hop <= HTTP_MAX_REDIRECTS; hop++) {
 		int status = 0;
 		char location[2048] = "";
-		if (stream_open_once(st, current, timeout_secs, &status, location, sizeof(location))) {
+		if (stream_open_once(st, current, timeout_secs, &status, location, sizeof(location), NULL)) {
 			return true;
 		}
 		if (status < 300 || status >= 400 || !location[0]) {
@@ -983,6 +991,17 @@ bool http_stream_open(http_stream_t *st, const char *url, int timeout_secs) {
 		}
 	}
 	return false;
+}
+
+bool http_stream_post_open(http_stream_t *st, const char *url, const char *form, int timeout_secs) {
+	if (!st || !url || !form) return false;
+	memset(st, 0, sizeof(*st));
+	st->fd = -1;
+	clear_last_error();
+	int status = 0;
+	char location[2048];
+	// Authenticated forms must not be replayed to a redirect destination.
+	return stream_open_once(st, url, timeout_secs, &status, location, sizeof(location), form);
 }
 
 // Reads exactly `len` raw bytes (lead buffer first, then the socket).
