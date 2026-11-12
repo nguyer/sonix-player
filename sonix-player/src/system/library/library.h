@@ -587,6 +587,8 @@ int library_index_find_name(const library_index_t *ix, const char *name);
 // Favourites count separately from the index: starring a track rewrites one row
 // of one table and must not invalidate a list of tracks.
 unsigned library_revision(library_list_t kind);
+// Called under the database lock: subscribers may enqueue work, never query it.
+void library_set_change_notify(void (*notify)(void));
 
 // Search across the index, one callback per hit. `path` is set for tracks
 // only. Returns the number of hits delivered.

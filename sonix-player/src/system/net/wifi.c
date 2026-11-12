@@ -1183,6 +1183,24 @@ static void do_forget(const char *ssid) {
 
 // The periodic read: link state, signal strength, and a DHCP request if
 // association happened without an address.
+static wifi_connection_callback_t connection_callback;
+static bool notified_online;
+static void notify_connection(void) {
+ pthread_mutex_lock(&lock);
+ bool online=g_status.state==WIFI_STATE_CONNECTED && g_status.ip[0];
+ wifi_connection_callback_t callback=connection_callback;
+ bool changed=online!=notified_online;
+ notified_online=online;
+ pthread_mutex_unlock(&lock);
+ if(changed && callback)callback(online);
+}
+void wifi_set_connection_callback(wifi_connection_callback_t callback) {
+ pthread_mutex_lock(&lock);connection_callback=callback;
+ bool online=g_status.state==WIFI_STATE_CONNECTED && g_status.ip[0];
+ notified_online=online;pthread_mutex_unlock(&lock);
+ if(callback)callback(online);
+}
+
 static void poll_status(void) {
 	static char buf[2048];
 	static uint32_t last_dhcp;
@@ -1241,6 +1259,8 @@ static void poll_status(void) {
 	}
 	bool now_online = g_status.state == WIFI_STATE_CONNECTED && g_status.ip[0] != '\0';
 	pthread_mutex_unlock(&lock);
+
+	notify_connection();
 
 	// A fresh association is the moment to ask the network for the time. The
 	// stock player does the same, running ntpdate against 0.pool.ntp.org and
@@ -1347,6 +1367,7 @@ static void *wifi_worker(void *arg) {
 			default:
 				break;
 			}
+			notify_connection();
 			continue;
 		}
 
@@ -1417,6 +1438,7 @@ static void set_enabled(bool on, bool remember) {
 	}
 	pthread_mutex_unlock(&lock);
 
+	notify_connection();
 	if (remember) {
 		config_set_int("wireless", "wifi", on ? 1 : 0);
 		config_save();

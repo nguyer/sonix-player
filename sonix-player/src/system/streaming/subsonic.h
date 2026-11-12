@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdatomic.h>
 
 // One account per context. Initialize before use; do not share a context across
 // workers without external locking. Network calls block: never call on the UI
@@ -26,6 +27,8 @@ typedef struct {
 	char suffix[16]; // original audio container, from the server
 	char album_artist[256], genre[128];
 	int year, disc;
+	long long size_bytes;
+	char created[40];
 } subsonic_song_t;
 
 // Rejects unsupported URLs, embedded credentials, and oversized input rather
@@ -42,10 +45,18 @@ int subsonic_search_songs(subsonic_client_t *client, const char *query, int offs
 // Worker-only. Streams the original audio to a new file using bounded memory.
 // Never overwrites an existing file; removes partial output on any failure.
 bool subsonic_download(subsonic_client_t *client, const char *song_id, const char *path);
+bool subsonic_download_limited(subsonic_client_t *client,const char *song_id,const char *path,
+ long long max_bytes,long long reserve_bytes,const atomic_bool *cancel);
 // Thread-safe cancellation and power-management status for the active transfer.
 void subsonic_download_cancel(void);
 bool subsonic_download_busy(void);
 // Fetch a bounded JPEG/PNG cover (caller frees *data). Worker-only.
 bool subsonic_cover(subsonic_client_t *client, const char *cover_id, char **data, size_t *size);
 
+void subsonic_forget_server(const char *server,const char *username);
+void subsonic_set_network_available(bool available);
+bool subsonic_network_available(void);
+unsigned subsonic_availability_revision(void);
+void subsonic_set_availability_notify(void (*notify)(void));
+bool subsonic_server_available(const char *server,const char *username);
 #endif

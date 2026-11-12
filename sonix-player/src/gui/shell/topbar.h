@@ -19,6 +19,7 @@ void topbar_refresh_volume(int percent);
 // five seconds, so the player calls this the moment the transport state
 // changes rather than letting the glyph lag behind the button.
 void topbar_refresh_playback(void);
+void topbar_refresh_navidrome(void);
 
 // Repaints the two radio glyphs, left of the battery: bluetooth first, then
 // wifi, then the charge percentage. Each appears only while its radio is on,

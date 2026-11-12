@@ -1,3 +1,5 @@
+#include "src/gui/streaming/subsonicpage.h"
+#include "src/system/library/libraryoffline.h"
 #include "trackmenu.h"
 
 #include <stdint.h>
@@ -1819,6 +1821,13 @@ void trackmenu_details_open(const char *path) {
 	switcher_set_player_return(NULL);
 }
 
+
+static char download_menu_path[512];
+static void download_current_action(void *user){
+ (void)user;const char *paths[]={download_menu_path};
+ int state=subsonicpage_download_state(paths,1);
+ if(state>=0)subsonicpage_download_paths(paths,1,OFFLINE_SONG,NULL,state==1);
+}
 void trackmenu_open(lv_obj_t *anchor) {
 	// Two tables rather than one with the label patched at runtime, because of
 	// the string-extraction tool: it reads popover_item_t initialisers (see
@@ -1849,7 +1858,11 @@ void trackmenu_open(lv_obj_t *anchor) {
 	device_state_get(&state);
 	bool podcast = state.current_file[0] && podcastcache_is_episode(state.current_file);
 
-	popover_show(anchor, podcast ? ITEMS_PODCAST : ITEMS, 5);
+ popover_item_t items[6];memcpy(items,podcast?ITEMS_PODCAST:ITEMS,sizeof(ITEMS));
+ int n=5;snprintf(download_menu_path,sizeof(download_menu_path),"%s",state.current_file);
+ const char *paths[]={download_menu_path};int downloaded=subsonicpage_download_state(paths,1);
+ if(downloaded>=0)items[n++]=(popover_item_t){downloaded==1?"Remove download":"Download",download_current_action,NULL};
+ popover_show(anchor,items,n);
 }
 
 void trackmenu_init(gui_config_t *cfg) {

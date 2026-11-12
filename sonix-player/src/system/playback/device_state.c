@@ -1,4 +1,5 @@
 #include "device_state.h"
+#include "src/system/streaming/subsonicavailability.h"
 
 #include "src/system/audio/alsa-controls.h"
 #include "src/system/audio/audio.h"
@@ -9,6 +10,7 @@
 #include "src/system/decode/growfile.h"
 #include "src/system/device/system.h"
 #include "src/system/library/library.h"
+#include "src/system/library/libraryremote.h"
 #include "src/system/library/metadata.h"
 #include "src/system/playback/audiobook.h"
 #include "src/system/playback/playhistory.h"
@@ -32,6 +34,12 @@
 // LVGL/UI thread (same as the rest of player.c today), so no lock needed.
 static song_metadata_t current_metadata;
 static char current_metadata_file[512] = {0};
+
+static void read_playback_metadata(const char *path,song_metadata_t *metadata){
+ metadata_read(path,metadata);
+ // Audio/sidecars may not exist yet; the catalog already knows this song.
+ library_remote_metadata(path,metadata);
+}
 
 // ---------------------------------------------------------------------------
 // "Remember track": where playback was, kept across a power cycle
@@ -279,6 +287,7 @@ void device_state_get(device_state_t *out) {
 		}
 
 		out->metadata = current_metadata;
+        if(!out->metadata.title[0])library_remote_metadata(out->current_file,&out->metadata);
 	}
 
 	char *battery = read_battery_percent();
@@ -536,6 +545,7 @@ static double podcast_resume(const char *filepath) {
 // `position` is where to start; below zero means the beginning, which is what
 // every caller but the resume below wants.
 static void load_and_play_at(const char *filepath, double position) {
+	if(!subsonic_track_available(filepath))return;
 	// A position picked on the outgoing track means nothing on this one, and
 	// the track can change under a held button -- the queue advances on its
 	// own when the outgoing one ends.
@@ -554,7 +564,7 @@ static void load_and_play_at(const char *filepath, double position) {
 		current_metadata_file[sizeof(current_metadata_file) - 1] = '\0';
 	}
 
-	metadata_read(current_metadata_file, &current_metadata);
+	read_playback_metadata(current_metadata_file, &current_metadata);
 	// Whether the loaded file is an audiobook is decided here, once per track
 	// change, and everything that dresses the player for one reads the answer
 	// from it. Every route by which the track can change passes through one of
@@ -605,7 +615,7 @@ static void load_paused(const char *filepath) {
 	if (filepath != current_metadata_file) {
 		snprintf(current_metadata_file, sizeof(current_metadata_file), "%s", filepath);
 	}
-	metadata_read(current_metadata_file, &current_metadata);
+	read_playback_metadata(current_metadata_file, &current_metadata);
 	audiobook_track_changed(current_metadata_file);
 	replaygain_load(&current_metadata);
 	apply_track_speed();
@@ -642,7 +652,7 @@ void device_state_restore_file(const char *filepath, double position) {
 
 	strncpy(current_metadata_file, filepath, sizeof(current_metadata_file) - 1);
 	current_metadata_file[sizeof(current_metadata_file) - 1] = '\0';
-	metadata_read(current_metadata_file, &current_metadata);
+	read_playback_metadata(current_metadata_file, &current_metadata);
 	// Whether the loaded file is an audiobook is decided here, once per track
 	// change, and everything that dresses the player for one reads the answer
 	// from it. Every route by which the track can change passes through one of
@@ -725,7 +735,7 @@ void device_state_restore_index(library_index_t *ix, int start_index, const char
 
 	strncpy(current_metadata_file, path, sizeof(current_metadata_file) - 1);
 	current_metadata_file[sizeof(current_metadata_file) - 1] = '\0';
-	metadata_read(current_metadata_file, &current_metadata);
+	read_playback_metadata(current_metadata_file, &current_metadata);
 	audiobook_track_changed(current_metadata_file);
 	replaygain_load(&current_metadata);
 	apply_track_speed();
@@ -771,7 +781,7 @@ void device_state_restore_list(const char *const *list, int count, int start_ind
 
 	strncpy(current_metadata_file, path, sizeof(current_metadata_file) - 1);
 	current_metadata_file[sizeof(current_metadata_file) - 1] = '\0';
-	metadata_read(current_metadata_file, &current_metadata);
+	read_playback_metadata(current_metadata_file, &current_metadata);
 	// Whether the loaded file is an audiobook is decided here, once per track
 	// change, and everything that dresses the player for one reads the answer
 	// from it. Every route by which the track can change passes through one of
@@ -818,7 +828,7 @@ void device_state_play_file_at(const char *filepath, double position) {
 		strncpy(current_metadata_file, filepath, sizeof(current_metadata_file) - 1);
 		current_metadata_file[sizeof(current_metadata_file) - 1] = '\0';
 	}
-	metadata_read(current_metadata_file, &current_metadata);
+	read_playback_metadata(current_metadata_file, &current_metadata);
 	audiobook_track_changed(current_metadata_file);
 	// The ReplayGain the tags asked for, worked out once per track.
 	replaygain_load(&current_metadata);
@@ -860,6 +870,7 @@ bool device_state_play_index(library_index_t *ix, int start_index) {
 	if (!playlist_current_path(path, sizeof(path))) {
 		return false;
 	}
+	if (!subsonic_track_available(path) && !playlist_next(path,sizeof(path))) return false;
 	load_and_play(path);
 	return true;
 }
@@ -871,7 +882,8 @@ void device_state_play_list(const char *const *list, int count, int start_index)
 	playlist_load_paths(list, count, start_index);
 
 	char path[512];
-	if (playlist_current_path(path, sizeof(path))) {
+	if (playlist_current_path(path, sizeof(path)) &&
+        (subsonic_track_available(path) || playlist_next(path,sizeof(path)))) {
 		load_and_play(path);
 	}
 }
@@ -897,6 +909,8 @@ void device_state_play_list_ordered_at(const char *const *list, int count, int s
 
 // Jumps to a specific entry of the current queue: the queue page's tap.
 bool device_state_play_queue_index(int index) {
+    char candidate[512];
+    if (!playlist_path_at(index,candidate,sizeof(candidate)) || !subsonic_track_available(candidate)) return false;
 	if (!playlist_set_current(index)) {
 		return false;
 	}

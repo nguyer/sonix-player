@@ -1,3 +1,7 @@
+#include "src/gui/shell/spinner.h"
+#include "src/system/streaming/subsonicoffline.h"
+#include "src/gui/streaming/subsonicpage.h"
+#include "src/system/library/libraryoffline.h"
 #include "medialist.h"
 
 #include <limits.h>
@@ -28,6 +32,7 @@
 #include "src/system/device/power.h"
 #include "src/gui/shell/switcher.h"
 #include "src/gui/shell/theme.h"
+#include "src/system/streaming/subsonicavailability.h"
 #include "src/gui/shell/confirm.h"
 #include "src/gui/shell/toast.h"
 #include "src/gui/shell/topbar.h"
@@ -227,6 +232,10 @@ typedef struct {
 	lv_obj_t *empty; // "nothing here" message
 	lv_obj_t *corner;	   // the right-hand button strip on the title row
 	lv_obj_t *reverse_btn; // Favourites: the list reversed (newest first)
+	lv_obj_t *download_btn,*download_spinner,*head_download_spinner;
+    bool download_running;
+    unsigned download_revision;
+    bool download_selective;
 	lv_obj_t *play_btn;	   // the circle-play corner button
 	lv_obj_t *play_menu;   // and the card it opens, one per screen
 	lv_obj_t *play_menu_random_album; // ...whose "albums in random order" row comes and goes
@@ -299,7 +308,7 @@ typedef struct {
 	lv_obj_t *head_title;
 	lv_obj_t *head_artist;
 	lv_obj_t *head_meta;
-	lv_obj_t *head_buttons[3]; // shuffle, play, a track into the queue
+	lv_obj_t *head_buttons[4]; // shuffle, play, a track into the queue
 	// Behind the heading row while the head is scrolled under it. With the head
 	// up, the list runs to the top of the page so the cover can stand level
 	// with the chevron, and the rows would otherwise pass under the heading.
@@ -1004,6 +1013,21 @@ static bool entry_is_now_playing(panel_t *p, int index) {
 }
 
 static void row_update_playmark(panel_t *p, row_t *row) {
+ if(row->button && row->index>=0) {
+  const char *name=NULL,*path=NULL;bool available=true;
+  if(row_at(p,row->index,&name,&path)){
+   if(p->is_tracks)available=path && subsonic_track_available(path);
+   else if(p->kind==LIBRARY_LIST_ALBUMS)available=subsonic_album_available(name);
+  }
+  // Keep the card opaque so LVGL can cull covered rows during scrolling.
+  // Dimming only foreground content avoids translucent full-row compositing.
+  lv_opa_t opacity=available?LV_OPA_COVER:LV_OPA_40;
+  lv_obj_set_style_opa(row->button,LV_OPA_COVER,0);
+  lv_obj_t *labels[]={row->label,row->artist,row->number};
+  for(unsigned i=0;i<sizeof(labels)/sizeof(labels[0]);++i)if(labels[i])lv_obj_set_style_text_opa(labels[i],opacity,0);
+  lv_obj_t *images[]={row->icon,row->chevron,row->check,row->menu_btn?lv_obj_get_child(row->menu_btn,0):NULL};
+  for(unsigned i=0;i<sizeof(images)/sizeof(images[0]);++i)if(images[i])lv_obj_set_style_image_opa(images[i],opacity,0);
+ }
 	if (!row->playmark) {
 		return;
 	}
@@ -1032,6 +1056,16 @@ static void panel_refresh_playmarks(panel_t *p) {
 	}
 }
 
+static void download_refresh(panel_t *p,bool force);
+
+void medialist_notify_availability(void){
+ subsonicavailability_refresh();
+ panel_t *panels[]={&panel_names,&panel_tracks,&panel_artist_albums};
+ for(int i=0;i<3;++i)if(panels[i]->rows[0].button && panels[i]->screen==lv_screen_active()){
+  panel_refresh_playmarks(panels[i]);download_refresh(panels[i],true);
+ }
+}
+static void availability_loaded(lv_event_t *event){(void)event;medialist_notify_availability();}
 void medialist_notify_now_playing(void) {
 	// Before the pages exist (the boot-time restore refreshes the player
 	// before the GUI is finished) there is nothing to mark.
@@ -1221,13 +1255,14 @@ static void sel_clear(panel_t *p) {
 // The corner's usual buttons, in the order medialist_open() shows them, for
 // saving and bringing back around the mode.
 static lv_obj_t **corner_usual(panel_t *p, int *count) {
-	static lv_obj_t *buttons[5];
+	static lv_obj_t *buttons[6];
 	buttons[0] = p->album_btn;
 	buttons[1] = p->reorder_btn;
 	buttons[2] = p->play_btn;
 	buttons[3] = p->reverse_btn;
 	buttons[4] = p->sort_btn;
-	*count = 5;
+	buttons[5]=p->download_btn;
+	*count = 6;
 	return buttons;
 }
 
@@ -2617,7 +2652,8 @@ static void row_clicked_cb(lv_event_t *e) {
 		}
 	}
 
-	if (p->is_tracks) {
+ if(p->is_tracks && !subsonic_track_available(path))return;
+ if (p->is_tracks) {
 		// The queue is this list, so next/prev walk it -- not the folder the
 		// file happens to live in.
 		//
@@ -3179,6 +3215,63 @@ static library_index_t *menu_tracks_open(panel_t *p) {
 	return NULL;
 }
 
+
+static bool download_list(panel_t *p,path_list_t *list){
+ if(!p->is_tracks || !(p->playlist[0] || (p->kind==LIBRARY_LIST_TRACKS && p->filter==LIBRARY_FILTER_ALBUM)))return false;
+ for(int i=0;i<p->count;++i){char path[512];if(!row_path_copy(p,i,path,sizeof(path)) || !path_list_add(list,path))return false;}
+ return true;
+}
+static void download_clicked_cb(lv_event_t *e){
+ panel_t *p=lv_event_get_user_data(e);
+ if(!p || p->selecting || switcher_back_drag_active())return;
+ path_list_t list={0};
+ if(download_list(p,&list)){
+  int state=subsonicpage_download_state((const char *const *)list.paths,list.count);
+  if(state>=0)subsonicpage_download_paths((const char *const *)list.paths,list.count,p->playlist[0]?OFFLINE_PLAYLIST:OFFLINE_ALBUM,p->playlist,state==1);
+ }
+ path_list_free(&list);download_refresh(p,true);
+}
+static void download_refresh(panel_t *p,bool force){
+ if(!p->download_btn || p->selecting)return;
+ bool selective=subsonicpage_selective();unsigned revision=subsonicpage_download_revision();
+ bool running=subsonicoffline_busy();
+ if(!force && !running && !p->download_running && p->download_revision==revision && p->download_selective==selective)return;
+ p->download_running=running;
+ p->download_revision=revision;p->download_selective=selective;
+ path_list_t list={0};int state=-1;
+ if(selective && download_list(p,&list))state=subsonicpage_download_state((const char *const *)list.paths,list.count);
+ bool pending=state>=0 && subsonicpage_download_pending((const char *const *)list.paths,list.count,p->playlist);
+ path_list_free(&list);
+ const lv_image_dsc_t *icon=state==1?&icon_trash:&icon_download;
+ lv_image_set_src(lv_obj_get_child(p->download_btn,0),icon);
+ bool in_head=p->head && album_head && p->filter==LIBRARY_FILTER_ALBUM && !p->playlist[0];
+ if(p->head_buttons[3]){
+  lv_obj_set_hidden(p->head_buttons[3],!(state>=0 && in_head));
+  lv_image_set_src(lv_obj_get_child(p->head_buttons[3],0),icon);
+ }
+
+ lv_obj_t *buttons[]={p->download_btn,p->head_buttons[3]};
+ lv_obj_t **spinners[]={&p->download_spinner,&p->head_download_spinner};
+ for(int i=0;i<2;++i)if(buttons[i]){
+  bool spinning=pending && (i==0?!in_head:in_head);
+  lv_obj_set_hidden(lv_obj_get_child(buttons[i],0),spinning);
+  if(spinning && !*spinners[i]){*spinners[i]=spinner_create(buttons[i],&icon_refresh);lv_image_set_scale(*spinners[i],256*icon_download.header.w/icon_refresh.header.w);lv_obj_center(*spinners[i]);}
+  if(!spinning && *spinners[i]){lv_obj_delete(*spinners[i]);*spinners[i]=NULL;}
+  if(spinning){
+   lv_obj_set_style_image_recolor(*spinners[i],lv_obj_get_style_image_recolor(lv_obj_get_child(buttons[i],0),0),0);
+   lv_obj_set_style_opa(buttons[i],LV_OPA_COVER,LV_STATE_DISABLED);
+   lv_obj_add_state(buttons[i],LV_STATE_DISABLED);
+  }else lv_obj_remove_state(buttons[i],LV_STATE_DISABLED);
+ }
+ bool shown=state>=0 && !in_head;
+ bool was_shown=!lv_obj_is_hidden(p->download_btn);
+ show_if(p->download_btn,shown);
+ if(was_shown!=shown){
+  p->corner_slots+=shown?1:-1;
+  settingsrow_title_corner_slots(p->title_label,p->cfg,p->corner_slots);
+ }
+}
+
 // The record the queue ends on, for album chaining to carry on from: the last
 // row of the album list the user is looking at, which is the same list the
 // queue was built from.
@@ -3532,6 +3625,12 @@ static void menu_album_action(void *user) {
 	}
 }
 
+
+static void menu_download_action(void *user){
+ (void)user;const char *paths[]={menu_path};
+ int state=subsonicpage_download_state(paths,1);
+ if(state>=0)subsonicpage_download_paths(paths,1,OFFLINE_SONG,NULL,state==1);
+}
 static void menu_btn_cb(lv_event_t *e) {
 	lv_event_stop_bubbling(e);
 
@@ -3567,7 +3666,7 @@ static void menu_btn_cb(lv_event_t *e) {
 		menu_album[0] = '\0';
 	}
 
-	popover_item_t items[5];
+	popover_item_t items[6];
 	int n = 0;
 	// The two "add to" lines stay next to each other: they are the same kind
 	// of thing, and reading past one to reach the other is friction with no
@@ -3593,6 +3692,10 @@ static void menu_btn_cb(lv_event_t *e) {
 	}
 
 	items[n++] = (popover_item_t){"details", menu_details_action, NULL};
+ const char *download_paths[]={menu_path};
+ int download_state=(p->playlist[0] || p->filter==LIBRARY_FILTER_ALBUM)?subsonicpage_download_state(download_paths,1):-1;
+ if(download_state>=0)items[n++]=(popover_item_t){download_state==1?"Remove download":"Download",menu_download_action,NULL};
+
 	popover_show(button, items, n);
 }
 
@@ -3762,6 +3865,8 @@ static void build_panel(panel_t *p, gui_config_t *cfg, bool is_tracks, int slot_
 	// Ways to start the whole of what the list is showing. Built on every
 	// panel: which lists actually wear it is medialist_open()'s to decide.
 	p->play_btn = corner_button(p->corner, &icon_circle_play, play_menu_clicked_cb, p);
+    p->download_btn=corner_button(p->corner,&icon_download,download_clicked_cb,p);
+    lv_obj_move_to_index(p->download_btn,0);
 
 	// The Favourites reverse button, to the left of shuffle: created before
 	// it, so the flex row lays the two out in that order.
@@ -4192,7 +4297,7 @@ static void head_paint(panel_t *p) {
 	}
 	local_color(p->head_meta, LV_STYLE_TEXT_COLOR, 0, t, p->tint_dim);
 
-	for (int i = 0; i < 3; i++) {
+	for (int i = 0; i < 4; i++) {
 		lv_obj_t *button = p->head_buttons[i];
 		if (!button) {
 			continue;
@@ -4280,11 +4385,12 @@ static void head_clear(panel_t *p) {
 	if (p->head) {
 		lv_obj_delete(p->head); // the picture goes before its pixels do
 		p->head = NULL;
+        p->head_download_spinner=NULL;
 		p->head_cover = NULL;
 		p->head_title = NULL;
 		p->head_artist = NULL;
 		p->head_meta = NULL;
-		for (int i = 0; i < 3; i++) {
+		for (int i = 0; i < 4; i++) {
 			p->head_buttons[i] = NULL;
 		}
 		lv_label_set_text(p->title_label, p->title);
@@ -4497,6 +4603,9 @@ static void head_build(panel_t *p) {
 	lv_obj_set_event_bubble(buttons, true);
 	p->head_buttons[0] = head_glyph_button(buttons, &icon_shuffle, head_shuffle_cb, p);
 	p->head_buttons[1] = head_play_button(buttons, head_play_cb, p);
+    p->head_buttons[3]=head_glyph_button(buttons,&icon_download,download_clicked_cb,p);
+    lv_obj_move_to_index(p->head_buttons[3],0);
+    lv_obj_set_hidden(p->head_buttons[3],true);
 	p->head_buttons[2] = head_glyph_button(buttons, &icon_list_queue, head_queue_cb, p);
 	head_paint(p);
 
@@ -4697,6 +4806,8 @@ void medialist_set_album_head(bool on) {
 		row_drop_thumb(p, &p->rows[i]);
 		p->rows[i].index = -2;
 	}
+	// Recompute the toolbar from its base slots after changing layouts.
+    show_if(p->download_btn,false);
 	// circle-play only without the head, whose buttons stand in for it.
 	show_corner(p->play_btn, !on);
 	p->corner_slots = on ? 0 : 1;
@@ -4707,6 +4818,7 @@ void medialist_set_album_head(bool on) {
 	lv_obj_scroll_to_y(p->list, 0, LV_ANIM_OFF);
 	p->saved_scroll = 0;
 	window_update(p);
+    download_refresh(p,true);
 }
 
 // ---------------------------------------------------------------------------
@@ -4968,6 +5080,7 @@ void medialist_open(const char *title, library_list_t kind, library_filter_t fil
 	reorder_stop(p);
 	selection_stop(p);
 
+	show_if(p->download_btn,false);
 	show_corner(p->reorder_btn, want_reorder);
 	show_corner(p->album_btn, want_album);
 	show_corner(p->play_btn, want_play);
@@ -4981,6 +5094,7 @@ void medialist_open(const char *title, library_list_t kind, library_filter_t fil
 	// runs under them.
 	int corner_buttons = (want_album ? 1 : 0) + (want_play ? 1 : 0) + (want_sort ? 1 : 0) + (want_reverse ? 1 : 0) +
 						 (want_reorder ? 1 : 0);
+	p->download_revision=~subsonicpage_download_revision();
 	p->corner_slots = corner_buttons;
 	settingsrow_title_corner_slots(p->title_label, p->cfg, corner_buttons);
 
@@ -5086,6 +5200,8 @@ void medialist_open(const char *title, library_list_t kind, library_filter_t fil
 	p->saved_scroll = target_scroll;
 	head_follow(p);
 	window_update(p);
+    // Paint the download/trash/progress state before the first visible frame.
+    download_refresh(p,true);
 
 	if (open_replacing) {
 		switch_screen_no_history(p->screen);
@@ -5118,6 +5234,8 @@ void medialist_open_paths(const char *title, const char *const *paths, const cha
 	// A list handed in as paths has an order of its own -- the one whoever
 	// built it put it in -- so the buttons that reorder the list stay away.
 	// circle-play is not one of them: it orders the queue, not the list.
+	show_if(p->download_btn,false);
+    p->download_revision=~subsonicpage_download_revision();
 	show_corner(p->play_btn, true);
 	show_corner(p->sort_btn, false);
 	show_corner(p->album_btn, false);
@@ -5163,6 +5281,7 @@ void medialist_open_paths(const char *title, const char *const *paths, const cha
 	lv_obj_scroll_to_y(p->list, 0, LV_ANIM_OFF);
 	p->saved_scroll = 0;
 	window_update(p);
+    download_refresh(p,true);
 
 	switch_screen(p->screen);
 }
@@ -5216,6 +5335,7 @@ void medialist_init(gui_config_t *cfg) {
 		corner_button(panel_artist_albums.corner, &icon_album_corner, album_order_clicked_cb, &panel_artist_albums);
 	lv_obj_move_to_index(panel_artist_albums.album_btn, 0);
 
+ for(size_t i=0;i<sizeof(panels)/sizeof(panels[0]);++i)lv_obj_add_event_cb(panels[i]->screen,availability_loaded,LV_EVENT_SCREEN_LOADED,NULL);
 	thumb_timer = lv_timer_create(thumb_timer_cb, THUMB_POLL_MS, NULL);
 	lv_timer_pause(thumb_timer);
 

@@ -60,7 +60,7 @@ bool library_remote_stage(const library_remote_track_t *rows, int count) {
 	sqlite3_stmt *s = NULL;
 	bool transaction = db && !scan_running && rows && count >= 0 && exec("BEGIN");
 	bool ok = transaction;
-	if (ok) ok = sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO REMOTE_STAGE VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+	if (ok) ok = sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO REMOTE_STAGE VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
 		-1, &s, NULL) == SQLITE_OK;
 	for (int i = 0; ok && i < count; ++i) {
 		const library_remote_track_t *r = &rows[i];
@@ -80,6 +80,7 @@ bool library_remote_stage(const library_remote_track_t *rows, int count) {
 		sqlite3_bind_text(s, 17, r->song.album_artist, -1, SQLITE_TRANSIENT);
 		sqlite3_bind_text(s, 18, r->song.genre, -1, SQLITE_TRANSIENT);
 		sqlite3_bind_int(s, 19, r->song.year); sqlite3_bind_int(s, 20, r->song.disc);
+		sqlite3_bind_int64(s,21,r->song.size_bytes);sqlite3_bind_text(s,22,r->song.created,-1,SQLITE_TRANSIENT);
 		ok = sqlite3_step(s) == SQLITE_DONE;
 		sqlite3_reset(s); sqlite3_clear_bindings(s);
 	}
@@ -136,6 +137,9 @@ bool library_remote_get(const char *path, library_remote_track_t *r) {
 		snprintf(r->song.album_artist, sizeof(r->song.album_artist), "%s", aa ? aa : "");
 		snprintf(r->song.genre, sizeof(r->song.genre), "%s", genre ? genre : "");
 		r->song.year = sqlite3_column_int(s, 18); r->song.disc = sqlite3_column_int(s, 19);
+		r->song.size_bytes=sqlite3_column_int64(s,20);
+		const char *created=(const char *)sqlite3_column_text(s,21);
+		snprintf(r->song.created,sizeof(r->song.created),"%s",created?created:"");
 	}
 	sqlite3_finalize(s);
 	pthread_mutex_unlock(&db_lock);
@@ -175,4 +179,19 @@ int library_remote_covers(const char *source, int offset, char ids[][128], int c
 	sqlite3_finalize(s);
 	pthread_mutex_unlock(&db_lock);
 	return count;
+}
+
+bool library_remote_metadata(const char *path,song_metadata_t *metadata){
+ if(!path || !metadata || !strstr(path,"/.local/subsonic-cache/"))return false;
+ library_remote_track_t track;if(!library_remote_get(path,&track))return false;
+ if(!metadata->title[0])snprintf(metadata->title,sizeof(metadata->title),"%s",track.song.title);
+ if(!metadata->artist[0])snprintf(metadata->artist,sizeof(metadata->artist),"%s",track.song.artist);
+ if(!metadata->album_artist[0])snprintf(metadata->album_artist,sizeof(metadata->album_artist),"%s",track.song.album_artist);
+ if(!metadata->album[0])snprintf(metadata->album,sizeof(metadata->album),"%s",track.song.album);
+ if(!metadata->genre[0])snprintf(metadata->genre,sizeof(metadata->genre),"%s",track.song.genre);
+ if(!metadata->track_number)metadata->track_number=track.song.track;
+ if(!metadata->disc_number)metadata->disc_number=track.song.disc;
+ if(!metadata->year)metadata->year=track.song.year;
+ metadata->has_tags=metadata->has_tags || metadata->title[0] || metadata->artist[0] || metadata->album[0] || metadata->genre[0];
+ return true;
 }

@@ -31,19 +31,21 @@ encoding, reverse-proxy prefixes, pagination, API/HTTP/network failures,
 malformed replies, missing song IDs and credential clearing. They do not prove
 compatibility with a live Navidrome server or the device firmware.
 
-## Second milestone: account and song browsing
+## Connecting and synchronizing
 
-Open **Streaming > Navidrome** in the rebuilt simulator. Enter the server root
-URL, username and password, then select **Connect**. A successful connection
-enables **Search songs**. Results show title, artist and album, with twenty songs
-per page and Previous/Next actions. Selecting a song downloads it and starts
-playback as described below. The last full page may offer Next even when
-the following page is empty.
+Open **Streaming > Navidrome**. Enter the server root URL, username and password,
+then press **Connect**. Empty passwords appear blank; entered or saved passwords
+appear as dots. Successful connections are saved and restored automatically.
 
-Successful connections are now saved and restored automatically (fourth
-milestone). **Disconnect** clears the in-memory account, search results and
-query; **Forget saved connection** also deletes saved credentials. The editor
-masks passwords and clears its text when it is left. New screen labels are
+Press **Sync** to update the music catalog, artwork and server playlists, then
+download music selected by the offline settings. Browse and play songs from the
+built-in music library; the initial test-only song search has been removed.
+
+The red trash icon beside the Navidrome title removes the connection after confirmation. It removes login
+credentials and stops server synchronization. Library entries, playlists and
+downloaded music remain on the device; completed downloads remain playable.
+Connect again to restore access to uncached server tracks and synchronization.
+The editor masks passwords and clears its text when it is left. New labels are
 currently English.
 
 Network requests run on a worker thread with one request at a time. The UI
@@ -87,8 +89,7 @@ The cache reserves space for a 512 MiB maximum track within a 1 GiB budget.
 This is deliberately conservative: new downloads stop once existing cache
 contents exceed 512 MiB. There is no automatic eviction or cache-management UI
 yet; remove old files from this cache directory while playback is stopped if
-it fills up. This cache is separate from the planned offline synchronization
-library. Interrupted files are deleted, and the audio file is published by
+it fills up. Pinned offline downloads are separate from this playback-cache budget. Interrupted files are deleted, and the audio file is published by
 rename only after its metadata and identity have been written successfully.
 
 Select **Cancel download** to request cancellation. A blocked audio read is
@@ -126,7 +127,7 @@ are not enabled yet.
 ## Fourth milestone: saved account and unified remote library
 
 1. Restart the rebuilt simulator and connect once to save the account.
-2. Choose **Streaming > Navidrome > Sync catalog to music library**.
+2. Choose **Streaming > Navidrome > Sync**.
 3. Browse the normal Music views (tracks, albums, artists, album artists, genres
    and search). Remote metadata appears beside local files, without downloading
    the audio. Matching titles are separate tracks; no local-file matching occurs.
@@ -156,7 +157,7 @@ reports that the connection is available only for the session.
 
 The saved account is authenticated in the background at startup. A temporary
 network failure does not erase it; Connect retries with the saved credentials.
-**Forget saved connection** removes the saved account and disconnects, retaining
+**Remove connection** removes the saved account and disconnects, retaining
 catalog metadata and downloaded audio. Uncached songs then require reconnecting
 to the matching account; downloaded songs remain playable.
 
@@ -186,7 +187,7 @@ when their audio files do not exist yet. Thumbnail keys include the fetched
 image, so a previous cached absence does not hide newly available artwork.
 Images remain available after local library scans and restarts.
 
-After updating, restart the simulator and run **Sync catalog to music library**
+After updating, restart the simulator and run **Sync**
 once to backfill existing catalog artwork. Missing or invalid covers do not fail
 the song catalog import; the completion message reports unavailable covers, and
 another sync retries them. Image responses are limited to 2 MiB and must be
@@ -281,13 +282,12 @@ Edits to linked playlists (contents, ordering, renames and deletions) queue
 automatic background synchronization. A short quiet period coalesces edit
 bursts. Pending work lives in SQLite and survives restart; the saved matching
 account is used when available. Failure retries back off for about 30 seconds.
-Disconnecting suspends automatic work until that account is connected again.
+Forgetting the saved connection suspends automatic work until that account is connected again.
 
 Only linked playlist tables receive edit triggers. Server imports and successful
 syncs clear their own pending markers, preventing feedback loops. Background
 passes process pending linked playlists only: they neither upload local lists
-nor import every newly created server playlist. Use **Sync playlists with
-server** to refresh server-origin additions and changes when there are no local
+nor import every newly created server playlist. Use **Sync** to refresh server-origin additions and changes when there are no local
 edits. Existing links from older builds are reconciled once during upgrade.
 
 Background work does not navigate away from the current screen. Conflicting or
@@ -300,3 +300,123 @@ Tests cover zero automatic-sync calls for local-only edits, background uploads
 without navigation changes, persistent queued edits, failure/retry behavior,
 healthy playlists progressing beside a read-only conflict, automatic deletion,
 upgrade of existing links, and backup-import origin isolation.
+
+
+## Offline synchronization
+
+Open **Navidrome → Offline / cache settings** after connecting. Automatic sync is
+manual by default. Choose **Full library** to mirror the catalog, or **Selective** to
+download from the library itself. Album and playlist pages show a download icon
+to the left of the other toolbar controls (including the alternative album header). When all Navidrome tracks
+in that view are downloaded, it changes to a trash icon for removing downloads.
+Local-only tracks are unaffected.
+
+Album/playlist track menus and the now-playing three-dot menu offer **Download**
+or **Remove download** for Navidrome tracks in Selective mode. Downloads start
+immediately when connected, subject to storage and charging settings. Offline
+selections are saved for a later Sync. Linked server playlists remain selected
+as playlists, so later synchronization includes new playlist tracks. Local
+playlists select their server tracks individually.
+
+Explicitly removing a song excludes it from overlapping album/playlist rules,
+so automatic sync does not immediately download it again. Downloading the song
+or its album/playlist again clears that exclusion. Existing legacy selections
+remain effective; there are no separate selection menus in offline settings.
+
+The red **Remove all downloads** button asks for confirmation, clears selections,
+resets to Selective mode with automatic caching off, and deletes downloaded music for this connection.
+It keeps local music, other connections' downloads, library metadata, playlists
+and artwork. Removing a currently playing download stops that track.
+
+Settings persist per server account. Configure a storage limit (or unlimited),
+a free-space reserve and optionally charging-only downloads. Automatic sync
+and its refresh interval are configured on the main Navidrome page and apply
+to catalog, artwork, playlists and any configured offline downloads. The main Navidrome **Sync** button refreshes the catalog and playlists, then
+downloads selected tracks. **Stop offline sync** keeps completed downloads.
+Foreground playback takes priority over background downloads.
+
+Removal of songs no longer selected is opt-in. It removes only identifiable
+server downloads pinned by offline sync, preserves local music, and avoids
+current/queued music. A library-backed queue conservatively protects downloads
+until that queue is cleared.
+
+When server checks fail, uncached server tracks are dimmed and cannot be
+selected for playback. Next/previous playback skips them. Complete cached
+tracks and local music remain playable. On hardware, Wi-Fi link notifications
+immediately disable uncached tracks when disconnected. Reconnection triggers
+a server check. Healthy servers are not periodically pinged; a failed request
+enables recovery checks every 30 seconds while the network is connected.
+Successful requests restore availability and stop recovery checks. Wi-Fi
+association does not itself guarantee server reachability. The simulator uses
+host networking, so server request failures trigger its recovery checks.
+
+This first implementation downloads original files, with a 512 MiB per-track
+limit. Completed tracks survive cancellation/restart; an interrupted individual
+file restarts from the beginning. Transcoding and HTTP byte-range resume are
+not implemented yet. Changes in the server-reported file size trigger a fresh
+download. Automatic sync requires the app to be running.
+
+Offline mode offers Selective and Full library as choice chips; there is no Off option. On the main page, Automatic sync is an on/off
+switch; its Refresh interval slider is shown only when enabled. Offline storage
+limit uses a stepped slider. Reserve free space is shown only for Unlimited;
+the saved reserve remains enforced as a safety margin for bounded downloads.
+Charging-only downloads use a switch. Storage includes an Unlimited
+position. Offline sync is started from the main Sync button.
+
+Navidrome settings and selection lists retain their scroll position when a
+control changes. The Offline / cache settings row has a submenu arrow.
+
+
+In Selective mode, **Automatically cache recently played** controls retention
+of playback downloads. When enabled (the existing default), playback copies
+remain cached. When disabled, a song can still download before playback, but
+its temporary copy is discarded after playback stops or moves to another song.
+Paused playback keeps its copy. Interrupted-session temporary copies are
+cleaned up on the next connection attempt. Explicit offline downloads are
+protected, and downloading a temporary copy explicitly promotes it to an
+offline download. The toggle applies only to Selective mode.
+
+The Navidrome trash icon uses the normal toolbar colour. The main Navidrome settings page omits status text. Synchronization activity
+appears as a rotating sync glyph in the status bar; errors use popups.
+
+
+While an album or playlist has pending offline downloads, its download control
+shows a rotating circle instead of the download/trash glyph. The status-bar sync
+glyph covers catalog sync, playlist sync, playback downloads and offline jobs.
+Background reachability checks do not count as synchronization. Albums with no
+available tracks are dimmed when their server is unreachable; albums with a
+downloaded track and local-only albums remain available.
+
+The main Sync button becomes **Cancel sync** during catalog/playlist sync or
+song downloads, keeping its position instead of inserting extra actions.
+Cancel stops active server requests/offline transfers while retaining completed
+downloads and saved selections. Album and playlist progress uses the same
+rotating sync glyph as the status bar, at the normal toolbar size and colour.
+
+Now-playing metadata falls back to the locally stored server catalog before an
+audio file or its sidecars exist. Track title, artist and album therefore remain
+visible while downloading or when the server cannot be reached, including in
+the pull-down player and restored queues. File tags and ReplayGain remain intact.
+
+
+Theme updates track only live settings sliders; destroying/rebuilding a page
+unregisters its sliders. Accent, theme and Dynamic tint changes therefore cannot
+repaint deleted widgets, and all live sliders are covered without a fixed cap.
+
+Album availability is resolved by a lower-priority worker and cached for visible
+lists. Row binding never scans an album or checks its files. Network changes,
+library revisions and download/removal events invalidate results. A new album
+stays available until its first background result arrives. Unavailable rows dim
+foreground text/artwork while retaining opaque cards for efficient scrolling.
+
+
+Navidrome UI state is event driven: request completion, connection changes,
+library changes, background album results, and offline-job state/progress post
+coalesced notifications to the GUI thread. The 50 ms completion poll, one-second
+library availability/icon poll, and 500 ms offline-page state poll are removed.
+Repeated notifications share reserved mailbox slots, so a full ordinary GUI
+queue cannot drop these state updates.
+
+One one-second maintenance timer remains for scheduled refresh/retry deadlines,
+playlist edit quiet periods, and temporary playback-file cleanup. Spinner
+animation and the application's existing GUI dispatch fallback remain separate.

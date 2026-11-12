@@ -66,8 +66,8 @@ static void tag(FILE *f, const char *key, const char *value) {
 	fputc('\n', f);
 }
 
-bool subsoniccache_fetch(subsonic_client_t *c, const subsonic_song_t *song,
-						 const char *root, char *path, size_t size) {
+static bool cache_fetch(subsonic_client_t *c,const subsonic_song_t *song,
+ const char *root,char *path,size_t size,bool offline,int64_t allowance,int64_t reserve,bool force,const atomic_bool *cancel) {
 	c->error[0] = 0;
 	path[0] = 0;
 	if (!root || !*root || !song->id[0]) return fail(c, "Music storage is unavailable.");
@@ -95,7 +95,7 @@ bool subsoniccache_fetch(subsonic_client_t *c, const subsonic_song_t *song,
 		return fail(c, "Music cache path is too long.");
 	struct stat st;
 	subsonic_identity_t saved;
-	if (stat(target, &st) == 0 && st.st_size > 0 && subsoniccache_identity(target, &saved) &&
+	if (!force && stat(target, &st) == 0 && st.st_size > 0 && subsoniccache_identity(target, &saved) &&
 		!memcmp(&identity, &saved, sizeof(identity))) { strcpy(path, target); return true; }
 	snprintf(part, sizeof(part), "%s.part", target);
 	// Only this single serialized downloader owns .part files in this directory.
@@ -109,13 +109,22 @@ bool subsoniccache_fetch(subsonic_client_t *c, const subsonic_song_t *song,
 	while ((entry = readdir(d))) {
 		char file[768];
 		snprintf(file, sizeof(file), "%s/%s", dir, entry->d_name);
-		if (stat(file, &st) == 0 && S_ISREG(st.st_mode)) bytes += st.st_size;
+  char pin[800];snprintf(pin,sizeof(pin),"%s",file);
+  size_t length=strlen(pin);
+  if(length>8 && !strcmp(pin+length-8,".offline"))continue;
+  if(length>9 && !strcmp(pin+length-9,".identity"))pin[length-9]=0;
+  else if(length>5 && !strcmp(pin+length-5,".tags"))pin[length-5]=0;
+  strncat(pin,".offline",sizeof(pin)-strlen(pin)-1);
+  if(access(pin,F_OK)==0)continue;
+  if (stat(file, &st) == 0 && S_ISREG(st.st_mode)) bytes += st.st_size;
 	}
 	closedir(d);
-	if (bytes > 512LL * 1024 * 1024) return fail(c, "Song cache is full. Remove old cached songs before downloading more.");
-	if (!subsonic_download(c, song->id, part)) return false;
-	snprintf(tags, sizeof(tags), "%s.tags", target);
-	snprintf(identity_path, sizeof(identity_path), "%s.identity", target);
+ if(!offline && bytes>512LL*1024*1024)return fail(c,"Song cache is full. Remove old cached songs before downloading more.");
+ if(offline){if(!subsonic_download_limited(c,song->id,part,allowance,reserve,cancel))return false;}
+ else if(!subsonic_download(c,song->id,part))return false;
+ char final_tags[544],final_identity[544];
+ snprintf(final_tags,sizeof(final_tags),"%s.tags",target);snprintf(final_identity,sizeof(final_identity),"%s.identity",target);
+ snprintf(tags,sizeof(tags),"%s.tags.tmp",target);snprintf(identity_path,sizeof(identity_path),"%s.identity.tmp",target);
 	FILE *f = fopen(tags, "w");
 	bool ok = f != NULL;
 	if (f) {
@@ -131,10 +140,54 @@ bool subsoniccache_fetch(subsonic_client_t *c, const subsonic_song_t *song,
 		if (fwrite(&identity, sizeof(identity), 1, f) != 1) ok = false;
 		if (fclose(f) != 0) ok = false;
 	} else ok = false;
-	if (!ok || rename(part, target) != 0) {
+	if (!ok || rename(tags,final_tags)!=0 || rename(identity_path,final_identity)!=0 || rename(part, target) != 0) {
 		unlink(part); unlink(tags); unlink(identity_path);
 		return fail(c, "Cannot finish saving the downloaded song.");
 	}
 	strcpy(path, target);
 	return true;
+}
+
+bool subsoniccache_fetch(subsonic_client_t *c,const subsonic_song_t *song,const char *root,char *path,size_t size) {
+ return cache_fetch(c,song,root,path,size,false,512LL*1024*1024,0,false,NULL);
+}
+bool subsoniccache_fetch_offline(subsonic_client_t *c,const subsonic_song_t *song,const char *root,char *path,size_t size,
+ int64_t allowance,int64_t reserve,bool force,const atomic_bool *cancel) {
+ return cache_fetch(c,song,root,path,size,true,allowance,reserve,force,cancel);
+}
+
+bool subsoniccache_is_temporary(const char *path){
+ char temporary[560],pin[560];snprintf(temporary,sizeof(temporary),"%s.temporary",path);snprintf(pin,sizeof(pin),"%s.offline",path);
+ return access(temporary,F_OK)==0 && access(pin,F_OK)!=0;
+}
+bool subsoniccache_mark_temporary(const char *path){
+ char marker[560];snprintf(marker,sizeof(marker),"%s.offline",path);if(access(marker,F_OK)==0)return true;
+ snprintf(marker,sizeof(marker),"%s.temporary",path);FILE *f=fopen(marker,"w");if(!f)return false;
+ bool ok=fputs("Temporary playback download\n",f)>=0;if(fclose(f)!=0)ok=false;return ok;
+}
+bool subsoniccache_discard_temporary(const subsonic_client_t *client,const char *root,const char *path){
+ char marker[560];snprintf(marker,sizeof(marker),"%s.temporary",path);
+ if(access(marker,F_OK)!=0)return true;
+ subsonic_identity_t identity;
+ if(!subsoniccache_identity(path,&identity) || strcmp(identity.server,client->base_url) || strcmp(identity.username,client->username))return false;
+ subsonic_song_t song={0};snprintf(song.id,sizeof(song.id),"%s",identity.song_id);
+ const char *dot=strrchr(path,'.');if(!dot || strlen(dot+1)>=sizeof(song.suffix))return false;strcpy(song.suffix,dot+1);
+ char expected[512];if(!subsoniccache_path(client,&song,root,expected,sizeof(expected)) || strcmp(path,expected))return false;
+ char pin[560];snprintf(pin,sizeof(pin),"%s.offline",path);
+ if(access(pin,F_OK)==0){unlink(marker);return true;}
+ struct stat st;if(lstat(path,&st)==0){if(!S_ISREG(st.st_mode) || unlink(path)!=0)return false;}else if(errno!=ENOENT)return false;
+ const char *suffixes[]={".tags",".identity",".temporary"};
+ for(int i=0;i<3;++i){snprintf(marker,sizeof(marker),"%s%s",path,suffixes[i]);if(unlink(marker)!=0 && errno!=ENOENT)return false;}
+ return true;
+}
+void subsoniccache_cleanup_temporary(const subsonic_client_t *client,const char *root,const char *keep){
+ char directory[560];snprintf(directory,sizeof(directory),"%s/.local/subsonic-cache",root);
+ DIR *dir=opendir(directory);if(!dir)return;struct dirent *entry;
+ while((entry=readdir(dir))){
+  size_t n=strlen(entry->d_name);if(n<=10 || strcmp(entry->d_name+n-10,".temporary"))continue;
+  char path[512];int length=snprintf(path,sizeof(path),"%s/%.*s",directory,(int)(n-10),entry->d_name);
+  if(length<0 || length>=(int)sizeof(path) || (keep && !strcmp(keep,path)))continue;
+  subsoniccache_discard_temporary(client,root,path);
+ }
+ closedir(dir);
 }

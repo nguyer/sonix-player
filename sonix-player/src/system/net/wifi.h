@@ -16,7 +16,7 @@
 // Everything in this file is safe to call from the interface thread: the
 // blocking parts -- the scripts sleep whole seconds, wpa_cli forks -- run on
 // this module's own worker thread, and callers only read a snapshot of what it
-// has found. The UI polls; there are no callbacks.
+// has found. The UI can read snapshots or subscribe to link transitions.
 
 #define WIFI_SSID_MAX 64
 #define WIFI_MAX_NETWORKS 40
@@ -98,6 +98,10 @@ void wifi_set_enabled_transient(bool on);
 
 // A snapshot of where the radio is. Never blocks.
 void wifi_get_status(wifi_status_t *out);
+// One subscriber; invoked outside the Wi-Fi lock, possibly on the worker.
+// The callback must be thread-safe and must not touch GUI objects.
+typedef void (*wifi_connection_callback_t)(bool connected);
+void wifi_set_connection_callback(wifi_connection_callback_t callback);
 
 // The address wlan0 actually has, asked of the kernel rather than of the
 // supplicant: an ioctl, no fork, and no flapping. True when there is one.

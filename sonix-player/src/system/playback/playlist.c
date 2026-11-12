@@ -1,3 +1,4 @@
+#include "src/system/streaming/subsonicavailability.h"
 #include "playlist.h"
 
 #include "src/system/core/config.h"
@@ -1200,7 +1201,7 @@ bool playlist_current_path(char *out, size_t out_size) {
 
 bool playlist_at_end(void) { return entry_count == 0 || pos + 1 >= entry_count; }
 
-bool playlist_advance_auto(char *out, size_t out_size) {
+static bool playlist_advance_auto_once(char *out, size_t out_size) {
 	if (entry_count == 0)
 		return false;
 
@@ -1283,10 +1284,10 @@ bool playlist_peek_auto(char *out, size_t out_size) {
 			break;
 		}
 	}
-	return playlist_path_at((int)next, out, out_size);
+	return playlist_path_at((int)next, out, out_size) && subsonic_track_available(out);
 }
 
-bool playlist_next(char *out, size_t out_size) {
+static bool playlist_next_once(char *out, size_t out_size) {
 	if (entry_count == 0)
 		return false;
 	// Pressing next past the end of a shuffled deal asks for more, so it deals
@@ -1302,12 +1303,22 @@ bool playlist_next(char *out, size_t out_size) {
 	return playlist_current_path(out, out_size);
 }
 
-bool playlist_prev(char *out, size_t out_size) {
+static bool playlist_prev_once(char *out, size_t out_size) {
 	if (entry_count == 0)
 		return false;
 	pos = (pos + entry_count - 1) % entry_count;
 	return playlist_current_path(out, out_size);
 }
+
+// Bound each scan by the queue length, including repeat/shuffle modes.
+static bool available_step(bool (*step)(char *,size_t),char *out,size_t size){
+ size_t original=pos,attempts=entry_count;
+ for(size_t i=0;i<attempts;++i){if(!step(out,size))break;if(subsonic_track_available(out))return true;}
+ pos=original;return false;
+}
+bool playlist_advance_auto(char *out,size_t size){return available_step(playlist_advance_auto_once,out,size);}
+bool playlist_next(char *out,size_t size){return available_step(playlist_next_once,out,size);}
+bool playlist_prev(char *out,size_t size){return available_step(playlist_prev_once,out,size);}
 
 // ---------------------------------------------------------------------------
 // modes

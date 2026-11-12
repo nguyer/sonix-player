@@ -322,17 +322,30 @@ static lv_obj_t *make_card(lv_obj_t *parent, const char *name, lv_obj_t **value_
 	return card;
 }
 
-// Every stepped slider this file has built, so a theme change can repaint
-// their knob rings: the ring colour depends on the theme, and these pages are
-// built once at startup.
-#define SETTINGSROW_MAX_SLIDERS 16
-static lv_obj_t *built_sliders[SETTINGSROW_MAX_SLIDERS];
-static int built_slider_count;
-
+// Live stepped sliders, including settings pages which rebuild their controls.
+// Deleted widgets must never remain targets of a later accent/tint refresh.
+static lv_obj_t **built_sliders;
+static int built_slider_count,built_slider_capacity;
+static bool slider_refresh_registered;
 static void settingsrow_refresh_theme(void) {
-	for (int i = 0; i < built_slider_count; i++) {
-		theme_apply_slider_knob(built_sliders[i]);
-	}
+ for(int i=0;i<built_slider_count;++i)theme_apply_slider_knob(built_sliders[i]);
+}
+static void slider_deleted(lv_event_t *e){
+ lv_obj_t *slider=lv_event_get_current_target(e);
+ for(int i=0;i<built_slider_count;++i)if(built_sliders[i]==slider){
+  memmove(built_sliders+i,built_sliders+i+1,(size_t)(built_slider_count-i-1)*sizeof(*built_sliders));
+  --built_slider_count;break;
+ }
+}
+static void track_slider(lv_obj_t *slider){
+ if(built_slider_count==built_slider_capacity){
+  int capacity=built_slider_capacity?built_slider_capacity*2:16;
+  lv_obj_t **grown=realloc(built_sliders,(size_t)capacity*sizeof(*grown));if(!grown)return;
+  built_sliders=grown;built_slider_capacity=capacity;
+ }
+ if(!slider_refresh_registered){slider_refresh_registered=true;theme_register_refresh(settingsrow_refresh_theme);}
+ built_sliders[built_slider_count++]=slider;
+ lv_obj_add_event_cb(slider,slider_deleted,LV_EVENT_DELETE,NULL);
 }
 
 // The Adwaita slider shared by every card that carries one: thin round trough,
@@ -362,12 +375,7 @@ static lv_obj_t *make_slider(lv_obj_t *card, int steps, lv_event_cb_t cb) {
 	lv_obj_set_style_radius(slider, LV_RADIUS_CIRCLE, LV_PART_KNOB);
 	lv_obj_set_style_bg_color(slider, lv_color_white(), LV_PART_KNOB);
 	theme_apply_slider_knob(slider);
-	if (built_slider_count < SETTINGSROW_MAX_SLIDERS) {
-		if (built_slider_count == 0) {
-			theme_register_refresh(settingsrow_refresh_theme);
-		}
-		built_sliders[built_slider_count++] = slider;
-	}
+	track_slider(slider);
 	lv_obj_set_style_pad_all(slider, 8, LV_PART_KNOB);
 	lv_obj_set_style_shadow_width(slider, 8, LV_PART_KNOB);
 	lv_obj_set_style_shadow_opa(slider, LV_OPA_30, LV_PART_KNOB);

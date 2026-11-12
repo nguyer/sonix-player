@@ -1,6 +1,7 @@
 #ifndef SUBSONICCACHE_H
 #define SUBSONICCACHE_H
 #include "subsonic.h"
+#include <stdint.h>
 
 typedef struct {
 	char magic[8];
@@ -18,4 +19,10 @@ void subsoniccache_source(const subsonic_client_t *client, char out[33]);
 // Predicts the playback path without creating files or downloading audio.
 bool subsoniccache_path(const subsonic_client_t *client, const subsonic_song_t *song,
 	const char *root, char *path, size_t size);
+bool subsoniccache_fetch_offline(subsonic_client_t *client,const subsonic_song_t *song,
+ const char *root,char *path,size_t size,int64_t allowance,int64_t reserve,bool force,const atomic_bool *cancel);
+bool subsoniccache_mark_temporary(const char *path);
+bool subsoniccache_is_temporary(const char *path);
+bool subsoniccache_discard_temporary(const subsonic_client_t *client,const char *root,const char *path);
+void subsoniccache_cleanup_temporary(const subsonic_client_t *client,const char *root,const char *keep);
 #endif

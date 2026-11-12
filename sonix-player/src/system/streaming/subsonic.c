@@ -7,9 +7,49 @@
 #include <unistd.h>
 #include <strings.h>
 #include <pthread.h>
+#include <sys/statvfs.h>
 #include "src/system/core/json.h"
 #include "src/system/core/md5.h"
 #include "src/system/net/http.h"
+
+static pthread_mutex_t availability_lock=PTHREAD_MUTEX_INITIALIZER;
+static struct {char server[512],username[128];bool available;} servers[4];
+static unsigned server_slot,availability_revision;
+unsigned subsonic_availability_revision(void){pthread_mutex_lock(&availability_lock);unsigned value=availability_revision;pthread_mutex_unlock(&availability_lock);return value;}
+static void (*availability_notify)(void);
+void subsonic_set_availability_notify(void (*notify)(void)){pthread_mutex_lock(&availability_lock);availability_notify=notify;pthread_mutex_unlock(&availability_lock);}
+static void notify_availability(void){pthread_mutex_lock(&availability_lock);void (*notify)(void)=availability_notify;pthread_mutex_unlock(&availability_lock);if(notify)notify();}
+static bool network_available=true;
+void subsonic_forget_server(const char *server,const char *username) {
+ pthread_mutex_lock(&availability_lock);
+ for(int i=0;i<4;++i)if(!strcmp(servers[i].server,server) && !strcmp(servers[i].username,username))servers[i].available=false;
+ ++availability_revision;
+ pthread_mutex_unlock(&availability_lock);notify_availability();
+}
+bool subsonic_network_available(void) {
+ pthread_mutex_lock(&availability_lock);bool value=network_available;
+ pthread_mutex_unlock(&availability_lock);return value;
+}
+void subsonic_set_network_available(bool available) {
+ pthread_mutex_lock(&availability_lock);
+ if(network_available!=available){for(int i=0;i<4;++i)servers[i].available=false;++availability_revision;}
+ network_available=available;
+ pthread_mutex_unlock(&availability_lock);notify_availability();
+}
+static void note_server(const subsonic_client_t *c,bool available) {
+ pthread_mutex_lock(&availability_lock);unsigned previous=availability_revision;int slot=-1;
+ for(int i=0;i<4;++i)if(!strcmp(servers[i].server,c->base_url) && !strcmp(servers[i].username,c->username))slot=i;
+ if(slot<0){slot=(int)(server_slot++%4);++availability_revision;}
+ if(servers[slot].available!=(available && network_available))++availability_revision;
+ snprintf(servers[slot].server,sizeof(servers[slot].server),"%s",c->base_url);
+ snprintf(servers[slot].username,sizeof(servers[slot].username),"%s",c->username);
+ servers[slot].available=available && network_available;bool changed=previous!=availability_revision;pthread_mutex_unlock(&availability_lock);if(changed)notify_availability();
+}
+bool subsonic_server_available(const char *server,const char *username){
+ pthread_mutex_lock(&availability_lock);bool available=false;
+ for(int i=0;i<4;++i)if(!strcmp(servers[i].server,server) && !strcmp(servers[i].username,username))available=servers[i].available;
+ pthread_mutex_unlock(&availability_lock);return available;
+}
 
 static pthread_mutex_t transfer_lock = PTHREAD_MUTEX_INITIALIZER;
 static http_stream_t *active_stream;
@@ -109,9 +149,10 @@ bool subsonic_api_call(subsonic_client_t *c, const char *method, const char *par
 	int status = 0;
 	bool requested = http_request(url, &req, body, NULL, 2 * 1024 * 1024, 15, &status);
 	free(form);
-	if (!requested)
-		return fail(c, "Cannot reach the Subsonic server. Check the address and connection.");
+	if (!requested){note_server(c,false);return fail(c,"Cannot reach the Subsonic server. Check the address and connection.");}
+	note_server(c,status<500 && status!=401 && status!=403);
 	if (!json_parse(*body, doc)) {
+		note_server(c,false);
 		free(*body);
 		return fail(c, "Invalid JSON response from the Subsonic server.");
 	}
@@ -121,7 +162,7 @@ bool subsonic_api_call(subsonic_client_t *c, const char *method, const char *par
 	if (status == 200 && !strcmp(state, "ok")) return true;
 	// Do not echo arbitrary server messages: a proxy may reflect credentials.
 	long code = json_obj_long(doc, json_get(doc, *response, "error"), "code", 0);
-	if (code == 40 || status == 401) fail(c, "The server rejected the username or password.");
+	if (code == 40 || status == 401) {note_server(c,false);fail(c, "The server rejected the username or password.");}
 	else if (code == 50 || status == 403) fail(c, "This account cannot access the requested resource.");
 	else snprintf(c->error, sizeof(c->error), "Subsonic request failed (HTTP %d, API %ld).", status, code);
 	json_free(doc);
@@ -205,6 +246,8 @@ int subsonic_search_songs(subsonic_client_t *c, const char *query, int offset,
 		json_obj_str(&doc, item, "suffix", s->suffix, sizeof(s->suffix));
 		json_obj_str(&doc, item, "albumArtist", s->album_artist, sizeof(s->album_artist));
 		json_obj_str(&doc, item, "genre", s->genre, sizeof(s->genre));
+		s->size_bytes=json_obj_llong(&doc,item,"size",0);
+		json_obj_str(&doc,item,"created",s->created,sizeof(s->created));
 		s->year = (int)json_obj_long(&doc, item, "year", 0);
 		s->disc = (int)json_obj_long(&doc, item, "discNumber", 1);
 		long duration = json_obj_long(&doc, item, "duration", 0);
@@ -217,7 +260,12 @@ int subsonic_search_songs(subsonic_client_t *c, const char *query, int offset,
 	return count;
 }
 
-bool subsonic_download(subsonic_client_t *c, const char *id, const char *path) {
+bool subsonic_download(subsonic_client_t *c,const char *id,const char *path) {
+ return subsonic_download_limited(c,id,path,512LL*1024*1024,0,NULL);
+}
+
+bool subsonic_download_limited(subsonic_client_t *c,const char *id,const char *path,
+ long long allowance,long long reserve,const atomic_bool *cancel) {
 	if (!id || !*id || strlen(id) >= 128 || !path || !*path)
 		return fail(c, "Invalid song download parameters.");
 	char encoded[384], params[400], form[4096], url[640];
@@ -235,9 +283,11 @@ bool subsonic_download(subsonic_client_t *c, const char *id, const char *path) {
 	pthread_mutex_unlock(&transfer_lock);
 	http_stream_t stream;
 	if (!http_stream_post_open(&stream, url, form, 15)) {
+		note_server(c,false);
 		transfer_end(&stream);
 		return fail(c, "Cannot download the song. Check access and use the final server URL without redirects.");
 	}
+	note_server(c,true);
 	pthread_mutex_lock(&transfer_lock);
 	active_stream = &stream;
 	bool cancelled = transfer_cancelled;
@@ -246,10 +296,21 @@ bool subsonic_download(subsonic_client_t *c, const char *id, const char *path) {
 	bool audio = !strncasecmp(stream.content_type, "audio/", 6) ||
 		!strncasecmp(stream.content_type, "application/ogg", 15) ||
 		!strncasecmp(stream.content_type, "application/octet-stream", 24);
-	const long max_bytes = 512L * 1024L * 1024L;
+ long long budget=allowance;
+ if(cancel && atomic_load(cancel)){transfer_end(&stream);return fail(c,"Download interrupted.");}
+ char parent[600];snprintf(parent,sizeof(parent),"%s",path);
+ char *slash=strrchr(parent,'/');if(slash)*slash=0;else strcpy(parent,".");
+ struct statvfs space;
+ if(reserve>0){
+  if(statvfs(parent,&space)!=0){transfer_end(&stream);return fail(c,"Cannot check free storage.");}
+  long long available=(long long)space.f_bavail*(long long)space.f_frsize-reserve;
+  if(available<budget)budget=available;
+ }
+ const long max_bytes=(long)(budget<512LL*1024*1024?budget:512LL*1024*1024);
+ if(max_bytes<=0){transfer_end(&stream);return fail(c,"Offline storage limit or free-space reserve reached.");}
 	if (cancelled || !audio || stream.content_length < 0 || stream.content_length > max_bytes) {
 		transfer_end(&stream);
-		return fail(c, "Server returned an error or the song exceeds the 512 MiB limit.");
+		return fail(c, "Song exceeds the download/storage limit, or the server returned an error.");
 	}
 	int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
 	if (fd < 0) { transfer_end(&stream); return fail(c, "Cannot create the song cache file."); }
@@ -263,10 +324,15 @@ bool subsonic_download(subsonic_client_t *c, const char *id, const char *path) {
 		pthread_mutex_lock(&transfer_lock);
 		cancelled = transfer_cancelled;
 		pthread_mutex_unlock(&transfer_lock);
-		if (cancelled) { ok = false; break; }
+  if(cancel && atomic_load(cancel))cancelled=true;
+  if (cancelled) { ok = false; break; }
+  if(reserve>0 && total%(1024*1024)<(long)sizeof(buffer)){
+   if(statvfs(parent,&space)!=0 || (long long)space.f_bavail*(long long)space.f_frsize<reserve+(long long)sizeof(buffer)){ok=false;break;}
+  }
 		int n = http_stream_read(&stream, buffer, sizeof(buffer));
-		if (n == 0) break;
-		if (n < 0 || total > max_bytes - n) { ok = false; break; }
+		if (n == 0) { if(stream.content_length && total!=stream.content_length)note_server(c,false); break; }
+		if (n < 0) { if(!cancelled && !(cancel && atomic_load(cancel)))note_server(c,false); ok=false;break; }
+        if (total > max_bytes - n) { ok = false; break; }
 		if (stream.content_length && n > stream.content_length - total) { ok = false; break; }
 		if (fwrite(buffer, 1, (size_t)n, file) != (size_t)n) { ok = false; break; }
 		total += n;

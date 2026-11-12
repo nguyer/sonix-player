@@ -133,6 +133,7 @@ static pthread_mutex_t post_lock = PTHREAD_MUTEX_INITIALIZER;
 static gui_post_t post_ring[GUI_POST_MAX];
 static int post_head;
 static int post_count;
+static gui_post_t state_posts[8];
 static lv_timer_t *post_timer;
 
 // ---------------------------------------------------------------------------
@@ -199,9 +200,21 @@ bool gui_post(void (*cb)(void *), void *user) {
 	return queued;
 }
 
-static void post_drain_cb(lv_timer_t *timer) {
-	(void)timer;
+bool gui_post_coalesced(void (*cb)(void *),void *user){
+ if(!cb)return false;
+ pthread_mutex_lock(&post_lock);int slot=-1;bool pending=false;
+ for(int i=0;i<8;++i){
+  if(state_posts[i].cb==cb && state_posts[i].user==user){slot=i;pending=true;break;}
+  if(!state_posts[i].cb && slot<0)slot=i;
+ }
+ bool queued=slot>=0;if(queued)state_posts[slot]=(gui_post_t){cb,user};
+ pthread_mutex_unlock(&post_lock);
+ if(queued && !pending && post_wake_fd>=0){uint64_t one=1;ssize_t ignored=write(post_wake_fd,&one,sizeof(one));(void)ignored;}
+ return queued;
+}
 
+static void post_drain_cb(lv_timer_t *timer){(void)timer;gui_post_drain();}
+void gui_post_drain(void) {
 	// Reading the eventfd clears its counter. It happens here rather than in the
 	// main loop so it also applies when the safety-net timer did the waking, and
 	// the queue is drained exactly once either way.
@@ -213,13 +226,13 @@ static void post_drain_cb(lv_timer_t *timer) {
 
 	for (;;) {
 		pthread_mutex_lock(&post_lock);
-		if (post_count == 0) {
-			pthread_mutex_unlock(&post_lock);
-			return;
-		}
-		gui_post_t entry = post_ring[post_head];
-		post_head = (post_head + 1) % GUI_POST_MAX;
-		post_count--;
+        gui_post_t entry={0};
+        // State events cannot be starved by a full ordinary queue.
+        for(int i=0;i<8;++i)if(state_posts[i].cb){entry=state_posts[i];state_posts[i]=(gui_post_t){0};break;}
+        if(!entry.cb && post_count){
+         entry=post_ring[post_head];post_head=(post_head+1)%GUI_POST_MAX;--post_count;
+        }
+        if(!entry.cb){pthread_mutex_unlock(&post_lock);return;}
 		pthread_mutex_unlock(&post_lock);
 
 		// Outside the lock: the callback may post in turn.

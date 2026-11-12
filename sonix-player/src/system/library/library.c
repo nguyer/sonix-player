@@ -1,5 +1,6 @@
 #include "library.h"
 #include "libraryremote.h"
+#include "libraryoffline.h"
 
 #include "src/system/library/audiobookdb.h"
 #include "src/system/playback/playlist.h"
@@ -53,6 +54,9 @@
 #define FORMAT_APE 9
 
 static const char *const SCHEMA[] = {
+ "CREATE TABLE IF NOT EXISTS SUBSONIC_OFFLINE_OPTIONS(source TEXT PRIMARY KEY,mode INT,automatic INT,charging INT,cleanup INT,interval_minutes INT,max_bytes INT,reserve_bytes INT,last_run INT)",
+ "CREATE TABLE IF NOT EXISTS SUBSONIC_OFFLINE_RULES(source TEXT,kind INT,value TEXT,PRIMARY KEY(source,kind,value))",
+ "CREATE TABLE IF NOT EXISTS SUBSONIC_OFFLINE_FILES(source TEXT,id TEXT,path TEXT,bytes INT DEFAULT 0,stamp INT DEFAULT 0,wanted INT DEFAULT 1,status INT DEFAULT 0,PRIMARY KEY(source,id))",
 	"CREATE TABLE IF NOT EXISTS REMOTE_PLAYLIST_DIRTY(source TEXT,id TEXT,changed_at INT,PRIMARY KEY(source,id))",
 	"CREATE TABLE IF NOT EXISTS REMOTE_PLAYLISTS(source TEXT,id TEXT,local_name TEXT UNIQUE,base_local TEXT,"
 	"remote_name TEXT,hash TEXT,PRIMARY KEY(source,id))",
@@ -190,6 +194,13 @@ static const char *const SCHEMA[] = {
 // separately; "duplicate column name" is the ordinary answer here and means the
 // column is already there.
 static const char *const SCHEMA_COLUMNS[] = {
+ "ALTER TABLE SUBSONIC_OFFLINE_OPTIONS ADD COLUMN auto_cache INT DEFAULT 1",
+ "UPDATE SUBSONIC_OFFLINE_OPTIONS SET mode=1 WHERE mode=0",
+ "UPDATE SUBSONIC_OFFLINE_OPTIONS SET cleanup=0",
+ "ALTER TABLE REMOTE_MEDIA ADD COLUMN file_size INT DEFAULT 0",
+ "ALTER TABLE REMOTE_MEDIA ADD COLUMN created TEXT DEFAULT ''",
+ "ALTER TABLE REMOTE_STAGE ADD COLUMN file_size INT DEFAULT 0",
+ "ALTER TABLE REMOTE_STAGE ADD COLUMN created TEXT DEFAULT ''",
 	"ALTER TABLE MEDIA_TABLE ADD COLUMN sortkey TEXT",
 	// Unlike the sort keys, this one cannot be worked out from anything already
 	// in the table: it is in the file's tags and nowhere else. An index written
@@ -374,12 +385,15 @@ static gen_domain_t domain_of(library_list_t kind) {
 }
 
 // Call with db_lock held, or from somewhere no query can be in flight.
-static void bump_generation(gen_domain_t domain) { generation[domain]++; }
+static void (*change_notify)(void);
+void library_set_change_notify(void (*notify)(void)){pthread_mutex_lock(&db_lock);change_notify=notify;pthread_mutex_unlock(&db_lock);}
+static void bump_generation(gen_domain_t domain) { generation[domain]++;if(change_notify)change_notify(); }
 
 static void bump_all_generations(void) {
 	for (int i = 0; i < GEN_COUNT; i++) {
 		generation[i]++;
 	}
+    if(change_notify)change_notify();
 }
 
 unsigned library_revision(library_list_t kind) {
@@ -1480,7 +1494,7 @@ static bool playlist_table(const char *name, char *out, size_t out_size);
 // left where it was, which no scan can rebuild. The playlists, one table each,
 // are found by name.
 static const char *const KEPT_TABLES[] = {
-	"REMOTE_PLAYLISTS", "REMOTE_PLAYLIST_DIRTY",
+	"REMOTE_PLAYLISTS", "REMOTE_PLAYLIST_DIRTY", "SUBSONIC_OFFLINE_OPTIONS", "SUBSONIC_OFFLINE_RULES", "SUBSONIC_OFFLINE_FILES",
 	"FAVOURITES",			"PLAYBACK_STATE",		"PLAYBACK_QUEUE", "PLAYBACK_QUEUE_STATE",
 	"PLAYBACK_QUEUE_QUERY", "PLAYBACK_QUEUE_ALBUM", "PLAYLIST_MIGRATION",   "PLAY_COUNTS",
 	"PLAY_HISTORY",
@@ -5133,6 +5147,7 @@ static void prune_links(void);
 static void prune_names(void);
 static bool remote_restore(void);
 #include "libraryremote.inc"
+#include "libraryoffline.inc"
 
 // A scan: the tables emptied, the card walked, every file read.
 static void full_scan_run(void) {

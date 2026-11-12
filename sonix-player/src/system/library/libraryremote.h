@@ -1,6 +1,7 @@
 #ifndef LIBRARYREMOTE_H
 #define LIBRARYREMOTE_H
 #include "src/system/streaming/subsonic.h"
+#include "metadata.h"
 
 typedef struct {
 	char path[512], source[33], server[512], username[128];
@@ -12,6 +13,8 @@ typedef struct {
 bool library_remote_begin(const char *source);
 bool library_remote_stage(const library_remote_track_t *rows, int count);
 bool library_remote_publish(const char *source);
+// Fill missing display tags from the persistent catalog, even before audio exists.
+bool library_remote_metadata(const char *path,song_metadata_t *metadata);
 bool library_remote_get(const char *path, library_remote_track_t *row);
 int library_remote_count(const char *source);
 // Unique cover IDs for a staged catalog, with album-ID fallback.

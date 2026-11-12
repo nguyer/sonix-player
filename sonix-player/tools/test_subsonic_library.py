@@ -8,11 +8,13 @@ import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import threading
+import time
 import struct
 import zlib
 from urllib.parse import parse_qs
 
 failed_sync = False
+slow_download = False
 errors = []
 missing_art = True
 art_requests = {}
@@ -34,9 +36,13 @@ class CatalogServer(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        global failed_sync, missing_art, playlist_failure
-        if self.path == "/navidrome/test-fail-next-sync":
+        global failed_sync, missing_art, playlist_failure, slow_download
+        if self.path == "/navidrome/test-slow-download":
+            slow_download = True
+        elif self.path == "/navidrome/test-fail-next-sync":
             failed_sync = True
+        elif self.path == "/navidrome/test-recover-sync":
+            failed_sync = False
         elif self.path == "/navidrome/test-recover-art":
             missing_art = False
         elif self.path == "/navidrome/test-playlist-edit":
@@ -60,11 +66,18 @@ class CatalogServer(BaseHTTPRequestHandler):
         self.wfile.write(b"ok")
 
     def do_POST(self):
-        global playlist_sequence, playlist_failure
+        global playlist_sequence, playlist_failure, slow_download
         try:
             form = parse_qs(self.rfile.read(int(self.headers["Content-Length"])).decode(), keep_blank_values=True)
             assert form["u"] == ["user"]
-            assert form["t"] == [hashlib.md5(("private-password" + form["s"][0]).encode()).hexdigest()]
+            if form["t"] != [hashlib.md5(("private-password" + form["s"][0]).encode()).hexdigest()]:
+                payload = b'{"subsonic-response":{"status":"failed","error":{"code":40,"message":"Invalid credentials"}}}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
             endpoint = self.path.rsplit("/", 1)[-1]
             if endpoint in ("getPlaylists.view", "getPlaylist.view", "createPlaylist.view", "updatePlaylist.view", "deletePlaylist.view"):
                 def render(p, entries=False):
@@ -127,6 +140,9 @@ class CatalogServer(BaseHTTPRequestHandler):
                 self.wfile.write(cover_png)
                 return
             if self.path in ("/navidrome/rest/ping.view", "/navidrome/rest/download.view"):
+                if "download" in self.path and slow_download:
+                    slow_download = False
+                    time.sleep(0.5)
                 payload = b'{"subsonic-response":{"status":"ok"}}' if "ping" in self.path else b"fLaC" + b"fixture" * 100
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json" if "ping" in self.path else "audio/flac")
@@ -181,7 +197,7 @@ with tempfile.TemporaryDirectory(prefix="sonix-library-test-") as directory:
         ["pkg-config", "--libs", "sdl2", "freetype2", "opusfile", "wavpack"], text=True))
     subprocess.run(["g++", str(tmp / "test.o"), str(tmp / "main.o"), *objects,
                     *flags, "-lpthread", "-lm", "-ldl", "-lasound",
-                    "-Wl,--wrap=device_state_play_queue_index", "-Wl,--wrap=player_refresh_now_playing",
+                    "-Wl,--wrap=device_state_play_queue_index", "-Wl,--wrap=device_state_get", "-Wl,--wrap=library_index_open", "-Wl,--wrap=audio_get_status", "-Wl,--wrap=audio_get_current_file", "-Wl,--wrap=player_refresh_now_playing",
                     "-Wl,--wrap=subsonicplaylists_sync_pending", "-Wl,--wrap=gui_notify_popup",
                     "-o", str(tmp / "test")],
                    cwd=root, check=True)
@@ -190,7 +206,7 @@ with tempfile.TemporaryDirectory(prefix="sonix-library-test-") as directory:
     thread.start()
     try:
         subprocess.run([str(tmp / "test"), str(tmp), f"http://127.0.0.1:{server.server_port}/navidrome"],
-                       cwd=root, check=True, timeout=40)
+                       cwd=root, check=True, timeout=60)
         assert not errors, errors
         assert art_requests == {"shared-cover": 1, "missing-cover": 2}, art_requests
     finally:

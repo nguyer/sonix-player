@@ -32,6 +32,11 @@ void gui_init(gui_config_t *cfg);
 // False when the queue was full and the message dropped -- a caller that
 // passed heap memory owns it again and has to free it.
 bool gui_post(void (*cb)(void *), void *user);
+// Coalesced state notifications use eight reserved slots, independent of the
+// ordinary work queue. Repeated (callback,user) pairs occupy only one slot.
+bool gui_post_coalesced(void (*cb)(void *),void *user);
+// Drain pending work on the GUI thread (also used by headless integration tests).
+void gui_post_drain(void);
 
 // The descriptor the main loop waits on instead of sleeping on a timer: it
 // becomes readable as soon as something is posted. -1 when it could not be

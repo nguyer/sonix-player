@@ -112,6 +112,7 @@ void medialist_open_artist(const char *name);
 // carry it. Called from the player whenever the track changes; cheap enough
 // to call on a track that has not (it walks two dozen pool rows).
 void medialist_notify_now_playing(void);
+void medialist_notify_availability(void);
 
 // The list on screen brought up to date with the index, for a page that comes
 // back into view without being loaded again: the player sheet sliding off it.

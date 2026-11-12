@@ -1,3 +1,5 @@
+#include "src/gui/streaming/subsonicpage.h"
+#include "src/gui/shell/spinner.h"
 #include "topbar.h"
 
 #include <stdint.h>
@@ -98,6 +100,7 @@ static lv_obj_t *vol_label;
 static lv_obj_t *vol_icon;
 static lv_obj_t *hp_icon; // headphone jack indicator: hidden / theme / gold
 static lv_obj_t *play_icon;		 // play/pause indicator: hidden when nothing is loaded
+static lv_obj_t *sync_icon,*sync_holder;
 static lv_obj_t *library_icon;	 // Detect changes at work, or just done
 static lv_timer_t *library_timer; // takes the check glyph away
 static lv_obj_t *sonixlink_icon; // shown while a phone is driving the player
@@ -529,6 +532,11 @@ void topbar_set_library_check(topbar_library_t state) {
 	}
 }
 
+void topbar_refresh_navidrome(void){
+ if(!sync_holder)return;
+ bool shown=subsonicpage_sync_busy();
+ if(lv_obj_is_hidden(sync_holder)==shown)lv_obj_set_hidden(sync_holder,!shown);
+}
 static void radio_timer_cb(lv_timer_t *timer) {
 	(void)timer;
 	topbar_refresh_radios();
@@ -922,6 +930,12 @@ void topbar_init(gui_config_t *cfg) {
 	lv_obj_add_style(library_icon, &theme_style_icon, 0);
 	lv_obj_set_hidden(library_icon, true);
 
+ sync_holder=lv_obj_create(container_left);lv_obj_remove_style_all(sync_holder);
+ lv_obj_set_size(sync_holder,26,26);lv_obj_set_scrollable(sync_holder,false);lv_obj_set_clickable(sync_holder,false);
+ lv_obj_set_hidden(sync_holder,true);
+ sync_icon=spinner_create(sync_holder,&icon_refresh);
+ lv_image_set_scale(sync_icon,256*24/icon_refresh.header.w);lv_obj_center(sync_icon);
+
 	// And right of that, the SonixLink logo while a phone is on the other end.
 	// Alongside play/pause rather than in place of it: the phone is driving this
 	// player, not taking the sound away from it, so what the DAC is doing stays
@@ -1018,7 +1032,7 @@ void topbar_init(gui_config_t *cfg) {
 	// until a tinted page is shown (topbar_tint_on_screen).
 	lv_style_init(&tint_text_style);
 	lv_style_init(&tint_icon_style);
-	lv_obj_t *tinted_icons[] = {vol_icon, hp_icon, play_icon, library_icon, sonixlink_icon, bt_icon, wifi_icon};
+	lv_obj_t *tinted_icons[] = {vol_icon, hp_icon, play_icon, library_icon, sync_icon, sonixlink_icon, bt_icon, wifi_icon};
 	for (size_t i = 0; i < sizeof(tinted_icons) / sizeof(tinted_icons[0]); i++) {
 		lv_obj_add_style(tinted_icons[i], &tint_icon_style, 0);
 	}
