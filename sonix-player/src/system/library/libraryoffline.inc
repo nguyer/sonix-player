@@ -128,9 +128,9 @@ bool library_offline_clear(const char *source){
 }
 int library_offline_files(const char *source,int offset,offline_file_t *out,int max) {
  pthread_mutex_lock(&db_lock);sqlite3_stmt *s=NULL;int count=-1;
- if(db && sqlite3_prepare_v2(db,"SELECT id,path,bytes,stamp,wanted,status FROM SUBSONIC_OFFLINE_FILES WHERE source=? ORDER BY id LIMIT ? OFFSET ?",-1,&s,NULL)==SQLITE_OK){
+ if(db && sqlite3_prepare_v2(db,"SELECT f.id,f.path,f.bytes,f.stamp,f.wanted,f.status,COALESCE(r.file_size,0),r.path IS NOT NULL FROM SUBSONIC_OFFLINE_FILES f LEFT JOIN REMOTE_MEDIA r ON r.path=f.path AND r.source=f.source WHERE f.source=? ORDER BY f.id LIMIT ? OFFSET ?",-1,&s,NULL)==SQLITE_OK){
   sqlite3_bind_text(s,1,source,-1,SQLITE_TRANSIENT);sqlite3_bind_int(s,2,max);sqlite3_bind_int(s,3,offset);count=0;int rc;
-  while((rc=sqlite3_step(s))==SQLITE_ROW && count<max){offline_file_t *f=&out[count++];memset(f,0,sizeof(*f));snprintf(f->id,128,"%s",sqlite3_column_text(s,0));snprintf(f->path,512,"%s",sqlite3_column_text(s,1));f->bytes=sqlite3_column_int64(s,2);f->stamp=sqlite3_column_int64(s,3);f->wanted=sqlite3_column_int(s,4);f->status=sqlite3_column_int(s,5);}
+  while((rc=sqlite3_step(s))==SQLITE_ROW && count<max){offline_file_t *f=&out[count++];memset(f,0,sizeof(*f));snprintf(f->id,128,"%s",sqlite3_column_text(s,0));snprintf(f->path,512,"%s",sqlite3_column_text(s,1));f->bytes=sqlite3_column_int64(s,2);f->stamp=sqlite3_column_int64(s,3);f->wanted=sqlite3_column_int(s,4);f->status=sqlite3_column_int(s,5);f->remote_bytes=sqlite3_column_int64(s,6);f->catalog_present=sqlite3_column_int(s,7)!=0;}
   if(rc!=SQLITE_DONE)count=-1;
  }
  sqlite3_finalize(s);pthread_mutex_unlock(&db_lock);return count;

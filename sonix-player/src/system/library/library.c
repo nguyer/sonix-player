@@ -54,6 +54,7 @@
 #define FORMAT_APE 9
 
 static const char *const SCHEMA[] = {
+ "CREATE TABLE IF NOT EXISTS REMOTE_REMOVED(source TEXT,path TEXT,remote_id TEXT,PRIMARY KEY(source,path))",
  "CREATE TABLE IF NOT EXISTS SUBSONIC_OFFLINE_OPTIONS(source TEXT PRIMARY KEY,mode INT,automatic INT,charging INT,cleanup INT,interval_minutes INT,max_bytes INT,reserve_bytes INT,last_run INT)",
  "CREATE TABLE IF NOT EXISTS SUBSONIC_OFFLINE_RULES(source TEXT,kind INT,value TEXT,PRIMARY KEY(source,kind,value))",
  "CREATE TABLE IF NOT EXISTS SUBSONIC_OFFLINE_FILES(source TEXT,id TEXT,path TEXT,bytes INT DEFAULT 0,stamp INT DEFAULT 0,wanted INT DEFAULT 1,status INT DEFAULT 0,PRIMARY KEY(source,id))",
@@ -329,6 +330,7 @@ static const char *const SORT_INDEXES[] = {
 static sqlite3 *db;
 static pthread_mutex_t db_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool remote_restore(void);
+static void remote_clean_sql(sqlite3_context *,int,sqlite3_value **);
 static void playlist_auto_setup_locked(void);
 static void playlist_auto_mark_name_locked(const char *name);
 
@@ -1358,6 +1360,17 @@ static void album_keys_fill(void) {
 	printf("library: album keys written down for %d tracks in %u ms\n", sqlite3_changes(db), now_ms() - started_ms);
 }
 
+// Repair partially migrated and orphaned album groups before lists can open.
+// Missing local groups must be restored before pruning NULL/obsolete keys.
+static bool album_groups_reconcile(void){
+ return exec("INSERT OR IGNORE INTO ALBUM_GROUP_TABLE(album,album_key,sortkey) "
+  "SELECT m.album,m.album_key,sortkey(m.album) FROM "
+  "(SELECT album,album_key FROM MEDIA_TABLE WHERE album<>'' AND album_key IS NOT NULL GROUP BY album,album_key) m "
+  "WHERE NOT EXISTS(SELECT 1 FROM ALBUM_GROUP_TABLE g WHERE g.album=m.album AND g.album_key=m.album_key)")
+  && exec("DELETE FROM ALBUM_GROUP_TABLE WHERE album IS NULL OR album='' OR album_key IS NULL OR "
+   "NOT EXISTS(SELECT 1 FROM MEDIA_TABLE m WHERE m.album=ALBUM_GROUP_TABLE.album AND m.album_key=ALBUM_GROUP_TABLE.album_key)");
+}
+
 // library_history_revision()'s answer, read from the table once and then kept
 // up by library_history_add(). -1 until it has been read.
 static long long history_newest = -1;
@@ -1393,6 +1406,7 @@ static bool db_open_file(const char *db_path) {
 
 	// And whose an album is, for telling apart two records with one name.
 	sqlite3_create_function(db, "albumkey", 2, SQLITE_UTF8 | SQLITE_DETERMINISTIC, NULL, albumkey_sql, NULL, NULL);
+    sqlite3_create_function(db,"remote_clean",1,SQLITE_UTF8|SQLITE_DETERMINISTIC,NULL,remote_clean_sql,NULL,NULL);
 
 	// Where SQLite spills a sort it cannot hold in memory.
 	//
@@ -1440,7 +1454,16 @@ bool library_open(const char *db_path) {
 	}
 
 	pthread_mutex_lock(&db_lock);
-	remote_restore(); // recover remote rows even after an interrupted local scan
+ // Keep restoration and group repair atomic: no partially repaired list on restart.
+ bool transaction=exec("BEGIN");
+ bool restored=transaction && remote_restore() && album_groups_reconcile();
+ if(restored)restored=exec("COMMIT");
+ if(!restored){
+  if(transaction)exec("ROLLBACK");
+  pthread_mutex_unlock(&db_lock);
+  fprintf(stderr,"library: cannot repair album groups at startup\n");
+  library_close();return false;
+ }
 	playlist_auto_setup_locked();
 	links_check();
 	bump_all_generations(); // a different card is a different set of row ids
@@ -1494,7 +1517,7 @@ static bool playlist_table(const char *name, char *out, size_t out_size);
 // left where it was, which no scan can rebuild. The playlists, one table each,
 // are found by name.
 static const char *const KEPT_TABLES[] = {
-	"REMOTE_PLAYLISTS", "REMOTE_PLAYLIST_DIRTY", "SUBSONIC_OFFLINE_OPTIONS", "SUBSONIC_OFFLINE_RULES", "SUBSONIC_OFFLINE_FILES",
+	"REMOTE_PLAYLISTS", "REMOTE_PLAYLIST_DIRTY", "REMOTE_REMOVED", "SUBSONIC_OFFLINE_OPTIONS", "SUBSONIC_OFFLINE_RULES", "SUBSONIC_OFFLINE_FILES",
 	"FAVOURITES",			"PLAYBACK_STATE",		"PLAYBACK_QUEUE", "PLAYBACK_QUEUE_STATE",
 	"PLAYBACK_QUEUE_QUERY", "PLAYBACK_QUEUE_ALBUM", "PLAYLIST_MIGRATION",   "PLAY_COUNTS",
 	"PLAY_HISTORY",

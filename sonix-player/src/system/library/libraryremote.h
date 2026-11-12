@@ -13,6 +13,10 @@ typedef struct {
 bool library_remote_begin(const char *source);
 bool library_remote_stage(const library_remote_track_t *rows, int count);
 bool library_remote_publish(const char *source);
+typedef struct {char path[512],id[128];} library_remote_removed_t;
+int library_remote_removed(const char *source,int offset,library_remote_removed_t *rows,int capacity);
+bool library_remote_removed_done(const char *source,const char *path);
+bool library_remote_removed_pending(const char *source,const char *keep);
 // Fill missing display tags from the persistent catalog, even before audio exists.
 bool library_remote_metadata(const char *path,song_metadata_t *metadata);
 bool library_remote_get(const char *path, library_remote_track_t *row);

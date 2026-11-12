@@ -85,9 +85,10 @@ static void cleanup(job_t *job){
   offset+=n-removed;if(n<20)break;
  }
 }
+static long long offline_millis(void){struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return (long long)t.tv_sec*1000+t.tv_nsec/1000000;}
 static void *worker(void *arg){
- job_t *job=arg;bool ok=true;
- message("Refreshing Navidrome catalog...");
+ job_t *job=arg;bool ok=true;long long began=offline_millis();int cached=0,fetches=0;
+ message(job->refresh?"Refreshing Navidrome catalog...":"Checking offline downloads...");
  if(job->refresh && subsoniccatalog_sync(&job->client,job->root,&cancelled)<0)ok=false;
  char (*ids)[128]=NULL;int extra_count=0;
  if(ok && job->options.mode==OFFLINE_SELECTIVE)ok=extras(job,&ids,&extra_count);
@@ -101,24 +102,38 @@ static void *worker(void *arg){
   offline_file_t files[20];int n=library_offline_files(job->source,offset,files,20);if(n<0){ok=false;break;}
   for(int i=0;i<n;++i){
    if(files[i].wanted)++total;
-   if(files[i].bytes>0){struct stat st;bool valid=owned(job,&files[i],&st);library_offline_note(job->source,files[i].id,valid?st.st_size:0,files[i].stamp,valid?2:0);}
+   if(files[i].bytes>0){
+    struct stat st;bool valid=owned(job,&files[i],&st);
+    long long bytes=valid?st.st_size:0;int state=valid?2:0;
+    if((files[i].bytes!=bytes || files[i].status!=state) && !library_offline_note(job->source,files[i].id,bytes,files[i].stamp,state)){ok=false;message("Cannot update offline storage accounting.");break;}
+   }
   }
   if(n<20)break;
  }
  pthread_mutex_lock(&status_lock);status.total=total;pthread_mutex_unlock(&status_lock);
  if(ok && job->options.cleanup)cleanup(job);
+ long long used=library_offline_bytes(job->source);
  for(int offset=0;ok && !atomic_load(&cancelled);offset+=20){
   offline_file_t files[20];int n=library_offline_files(job->source,offset,files,20);if(n<0){ok=false;break;}
   for(int i=0;ok && i<n && !atomic_load(&cancelled);++i)if(files[i].wanted){
-   library_remote_track_t track;if(!library_remote_get(files[i].path,&track)){ok=false;message("Catalog changed during offline sync. Try again.");break;}
+   if(!files[i].catalog_present){ok=false;message("Catalog changed during offline sync. Try again.");break;}
    struct stat st;bool valid=owned(job,&files[i],&st);
-   long long used=library_offline_bytes(job->source);
-   bool force=valid && files[i].bytes>0 && track.song.size_bytes>0 && files[i].stamp!=track.song.size_bytes;
+   bool force=valid && files[i].bytes>0 && files[i].remote_bytes>0 && files[i].stamp!=files[i].remote_bytes;
    long long allowance=job->options.max_bytes?job->options.max_bytes-used+files[i].bytes:512LL*1024*1024;
    if((valid && !force && job->options.max_bytes && used-files[i].bytes+st.st_size>job->options.max_bytes) ||
-    (!valid && allowance<=0) || (track.song.size_bytes>0 && (!valid || force) && track.song.size_bytes>allowance)){
+    (!valid && allowance<=0) || (files[i].remote_bytes>0 && (!valid || force) && files[i].remote_bytes>allowance)){
     message("Offline storage limit reached. Existing downloads were kept.");ok=false;break;
    }
+   char marker[560];snprintf(marker,sizeof(marker),"%s.offline",files[i].path);
+   if(valid && !force && access(marker,F_OK)==0){
+    if((files[i].bytes!=st.st_size || files[i].stamp!=files[i].remote_bytes || files[i].status!=2) &&
+     !library_offline_note(job->source,files[i].id,st.st_size,files[i].remote_bytes,2)){ok=false;message("Cannot record offline download.");break;}
+    used+=st.st_size-files[i].bytes;++cached;
+    pthread_mutex_lock(&status_lock);++status.done;status.bytes=used;pthread_mutex_unlock(&status_lock);
+    if(cached%20==0)notify_job();
+    continue;
+   }
+   library_remote_track_t track;if(!library_remote_get(files[i].path,&track)){ok=false;message("Catalog changed during offline sync. Try again.");break;}
    pthread_mutex_lock(&status_lock);snprintf(status.path,sizeof(status.path),"%s",files[i].path);pthread_mutex_unlock(&status_lock);
    char text[256],path[512];snprintf(text,sizeof(text),"Downloading: %.210s",track.song.title);message(text);
    bool fetched=false;
@@ -129,21 +144,23 @@ static void *worker(void *arg){
     streamturn_acquire();
     if(atomic_load(&yielding) || atomic_load(&cancelled)){streamturn_release();continue;}
     atomic_store(&transferring,true);
+    ++fetches;
     fetched=subsoniccache_fetch_offline(&job->client,&track.song,job->root,path,sizeof(path),allowance,job->options.reserve_bytes,force,&interrupted);
     atomic_store(&transferring,false);streamturn_release();
     if(!fetched && serial==atomic_load(&yield_serial)){ok=false;message(job->client.error);break;}
    }
    if(fetched){
     if(stat(path,&st)!=0 || !pin(path) || !library_offline_note(job->source,files[i].id,st.st_size,track.song.size_bytes,2)){ok=false;message("Cannot record offline download. Try again.");break;}
-    pthread_mutex_lock(&status_lock);++status.done;status.bytes=library_offline_bytes(job->source);pthread_mutex_unlock(&status_lock);notify_job();
+    used+=st.st_size-files[i].bytes;
+    pthread_mutex_lock(&status_lock);++status.done;status.bytes=used;status.path[0]=0;pthread_mutex_unlock(&status_lock);notify_job();
    }
-   usleep(100000); // give foreground download requests the next turn
   }
   if(n<20)break;
  }
  if(atomic_load(&cancelled))message("Offline sync stopped. Completed downloads were kept.");
  else if(ok){library_offline_complete(job->source,time(NULL));message("Offline sync complete.");}
 finished:
+ fprintf(stderr,"Navidrome offline sync: %d cached, %d fetch/promote operations, %lld ms%s\n",cached,fetches,offline_millis()-began,atomic_load(&cancelled)?" (cancelled)":"");
  subsonic_client_clear(&job->client);free(job);atomic_fetch_add(&revision,1);atomic_store(&running,false);notify_job();return NULL;
 }
 bool subsonicoffline_start(const subsonic_client_t *client,const char *root,bool refresh){

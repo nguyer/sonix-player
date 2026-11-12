@@ -21,6 +21,23 @@
 #include "src/system/db/sqlite3.h"
 #include "src/gui/streaming/subsonicpage.c"
 
+static atomic_bool measure_unchanged;
+static atomic_uint measured_fetches,measured_notes,measured_sums;
+bool __real_subsoniccache_fetch_offline(subsonic_client_t *,const subsonic_song_t *,const char *,char *,size_t,int64_t,int64_t,bool,const atomic_bool *);
+bool __wrap_subsoniccache_fetch_offline(subsonic_client_t *c,const subsonic_song_t *song,const char *root,char *path,size_t size,int64_t allowance,int64_t reserve,bool force,const atomic_bool *cancel){
+ if(atomic_load(&measure_unchanged))atomic_fetch_add(&measured_fetches,1);
+ return __real_subsoniccache_fetch_offline(c,song,root,path,size,allowance,reserve,force,cancel);
+}
+bool __real_library_offline_note(const char *,const char *,int64_t,int64_t,int);
+bool __wrap_library_offline_note(const char *source,const char *id,int64_t bytes,int64_t stamp,int status){
+ if(atomic_load(&measure_unchanged))atomic_fetch_add(&measured_notes,1);
+ return __real_library_offline_note(source,id,bytes,stamp,status);
+}
+int64_t __real_library_offline_bytes(const char *);
+int64_t __wrap_library_offline_bytes(const char *source){
+ if(atomic_load(&measure_unchanged))atomic_fetch_add(&measured_sums,1);
+ return __real_library_offline_bytes(source);
+}
 static pthread_mutex_t availability_probe_lock=PTHREAD_MUTEX_INITIALIZER;
 static char availability_probe_album[256];
 static unsigned availability_probe_queries;
@@ -80,6 +97,7 @@ typedef struct { char values[10][512]; int count; } album_values_t;
 static bool collect_album(const char *name, const char *path, const char *artist, void *user) {
 	(void)artist;
 	album_values_t *values = user;
+	assert(name && *name); // a NULL album identity must never become "(no name)"
 	assert(path && *path); // an empty phantom album has no representative track
 	assert(values->count < 10);
 	snprintf(values->values[values->count++], 512, "%s", name);
@@ -578,6 +596,73 @@ static void test_temporary_playback(subsonic_client_t *client,const char *root,c
  assert(access(stale,F_OK)!=0 && access(path,F_OK)==0 && access(local,F_OK)==0);
 }
 
+
+static void test_removed_server_files(subsonic_client_t *client,const char *root,const char *local){
+ atomic_bool cancel=false;char source[33];subsoniccache_source(client,source);
+ subsonic_song_t song={0};strcpy(song.suffix,"flac");strcpy(song.id,"catalog-13");
+ char removed[512],active[512];assert(subsoniccache_fetch(client,&song,root,removed,sizeof(removed)));
+ offline_options_t options;assert(library_offline_options(source,&options));options.mode=OFFLINE_SELECTIVE;options.automatic=0;options.reserve_bytes=0;options.max_bytes=65536;
+ assert(library_offline_save_options(source,&options));char ids[1][128]={"catalog-13"};
+ assert(library_offline_select(source,OFFLINE_SONG,NULL,ids,1,true));
+ assert(subsonicoffline_start(client,root,false));wait_offline();
+ char side[560];snprintf(side,sizeof(side),"%s.offline",removed);assert(access(side,F_OK)==0);
+ strcpy(song.id,"catalog-14");assert(subsoniccache_fetch(client,&song,root,active,sizeof(active)));
+ control_server(client->base_url,"test-remove-track-13");
+ control_server(client->base_url,"test-fail-next-sync");
+ assert(subsoniccatalog_sync(client,root,&cancel)==-1 && access(removed,F_OK)==0);
+ library_remote_track_t track;assert(library_remote_get(removed,&track));
+ atomic_store(&cancel,true);assert(subsoniccatalog_sync(client,root,&cancel)==-1 && access(removed,F_OK)==0);atomic_store(&cancel,false);
+
+ control_server(client->base_url,"test-recover-sync");
+ // Cleanup must reject a mismatched owner and keep a durable retry record.
+ subsonic_identity_t original,wrong;assert(subsoniccache_identity(removed,&original));wrong=original;strcpy(wrong.username,"different-account");
+ snprintf(side,sizeof(side),"%s.identity",removed);FILE *identity_file=fopen(side,"wb");assert(identity_file);assert(fwrite(&wrong,sizeof(wrong),1,identity_file)==1);fclose(identity_file);
+ assert(subsoniccatalog_sync(client,root,&cancel)==-1 && access(removed,F_OK)==0);
+ assert(!library_remote_get(removed,&track) && library_remote_removed_pending(source,NULL));
+ char database[600];snprintf(database,sizeof(database),"%s/library.db",root);library_close();assert(library_open(database));
+ assert(library_remote_removed_pending(source,NULL));
+ identity_file=fopen(side,"wb");assert(identity_file);assert(fwrite(&original,sizeof(original),1,identity_file)==1);fclose(identity_file);
+ assert(subsoniccatalog_sync(client,root,&cancel)==50);
+ assert(access(removed,F_OK)!=0 && !library_remote_get(removed,&track));
+ const char *suffixes[]={".offline",".tags",".identity",".temporary"};
+ for(int i=0;i<4;++i){snprintf(side,sizeof(side),"%s%s",removed,suffixes[i]);assert(access(side,F_OK)!=0);}
+ assert(access(active,F_OK)==0 && access(local,F_OK)==0);
+ assert(!subsonic_track_available(removed)); // stale queue entries must not attempt missing files
+ // Active playback survives catalog removal, then cleanup runs after stopping.
+ snprintf(test_current_path,sizeof(test_current_path),"%s",active);test_audio_status=AUDIO_STATUS_PAUSED;
+ control_server(client->base_url,"test-remove-track-14");
+ assert(subsoniccatalog_sync(client,root,&cancel)==49 && access(active,F_OK)==0);
+ assert(library_remote_removed_pending(source,NULL) && !library_remote_removed_pending(source,active));
+ test_audio_status=AUDIO_STATUS_STOPPED;cleanup_retry_at=0;
+ start_pending_cleanup();assert(busy);pump_request();
+ assert(access(active,F_OK)!=0 && !library_remote_removed_pending(source,NULL));
+ test_current_path[0]=0;
+ assert(access(local,F_OK)==0);
+ control_server(client->base_url,"test-restore-tracks");
+ assert(subsoniccatalog_sync(client,root,&cancel)==51);
+}
+
+static void test_unchanged_offline_sync(subsonic_client_t *client,const char *root){
+ char source[33];subsoniccache_source(client,source);offline_options_t options;
+ assert(library_offline_options(source,&options));options.mode=OFFLINE_MIRROR;options.automatic=0;options.charging_only=0;options.max_bytes=131072;options.reserve_bytes=0;
+ assert(library_offline_save_options(source,&options));
+ assert(subsonicoffline_start(client,root,false));wait_offline();
+ subsonic_offline_status_t status;subsonicoffline_status(&status);assert(status.done==51 && status.total==51);
+ subsonic_song_t song={0};strcpy(song.id,"catalog-0");strcpy(song.suffix,"flac");
+ char path[512],marker[560];assert(subsoniccache_path(client,&song,root,path,sizeof(path)));snprintf(marker,sizeof(marker),"%s.offline",path);
+ struct stat before,after;assert(stat(marker,&before)==0);
+ atomic_store(&measured_fetches,0);atomic_store(&measured_notes,0);atomic_store(&measured_sums,0);atomic_store(&measure_unchanged,true);
+ struct timespec began,ended;clock_gettime(CLOCK_MONOTONIC,&began);
+ assert(subsonicoffline_start(client,root,false));wait_offline();clock_gettime(CLOCK_MONOTONIC,&ended);
+ atomic_store(&measure_unchanged,false);
+ long long elapsed=(long long)(ended.tv_sec-began.tv_sec)*1000+(ended.tv_nsec-began.tv_nsec)/1000000;
+ assert(atomic_load(&measured_fetches)==0 && atomic_load(&measured_notes)==0 && atomic_load(&measured_sums)==1);
+ assert(stat(marker,&after)==0 && before.st_mtim.tv_sec==after.st_mtim.tv_sec && before.st_mtim.tv_nsec==after.st_mtim.tv_nsec);
+ subsonicoffline_status(&status);assert(status.done==51 && status.total==51);
+ fprintf(stderr,"Unchanged offline sync: 51 cached tracks, %lld ms, zero fetches or per-track DB writes.\n",elapsed);
+ assert(elapsed<2000); // the old unconditional delay alone took 5100 ms
+ options.mode=OFFLINE_SELECTIVE;assert(library_offline_save_options(source,&options));
+}
 static int ordinary_events,coalesced_events;
 static void ordinary_event(void *unused){(void)unused;++ordinary_events;}
 static void coalesced_event(void *unused){(void)unused;++coalesced_events;}
@@ -663,8 +748,13 @@ int main(int argc, char **argv) {
 	sqlite3 *legacy = NULL;
 	assert(sqlite3_open(database, &legacy) == SQLITE_OK);
 	assert(sqlite3_exec(legacy,
-		"UPDATE MEDIA_TABLE SET album_key='aold' WHERE path IN(SELECT path FROM REMOTE_MEDIA);"
-		"INSERT OR IGNORE INTO ALBUM_GROUP_TABLE(album,album_key,sortkey) SELECT album,'aold',album FROM REMOTE_MEDIA;",
+		"UPDATE REMOTE_MEDIA SET album=album||' ';"
+        "UPDATE MEDIA_TABLE SET album_key='aold' WHERE path IN(SELECT path FROM REMOTE_MEDIA);"
+        "INSERT OR IGNORE INTO ALBUM_GROUP_TABLE(album,album_key,sortkey) SELECT album,album_key,album FROM MEDIA_TABLE WHERE path IN(SELECT path FROM REMOTE_MEDIA);"
+        "INSERT OR IGNORE INTO ALBUM_GROUP_TABLE(album,album_key,sortkey) SELECT album,album_key,album FROM REMOTE_MEDIA;"
+		"INSERT OR IGNORE INTO ALBUM_GROUP_TABLE(album,album_key,sortkey) SELECT album,'aold',album FROM REMOTE_MEDIA;"
+        "INSERT INTO ALBUM_GROUP_TABLE(album,album_key,sortkey) VALUES('Removed album one',NULL,'removed1'),('Removed album two',NULL,'removed2'),('Removed album three','orphan-key','removed3');"
+        "UPDATE ALBUM_GROUP_TABLE SET album_key=NULL WHERE album IN(SELECT album FROM MEDIA_TABLE WHERE path NOT IN(SELECT path FROM REMOTE_MEDIA));",
 		NULL, NULL, NULL) == SQLITE_OK);
 	sqlite3_close(legacy);
 	assert(library_open(database));
@@ -793,6 +883,8 @@ int main(int argc, char **argv) {
 	test_deleted_slider_theme();
 	test_context_downloads(&client,argv[1],local,&cfg);
 	test_temporary_playback(&client,argv[1],local,database);
+	test_removed_server_files(&client,argv[1],local);
+	test_unchanged_offline_sync(&client,argv[1]);
 	// Same title, different remote album IDs stay separate even with local
 	// folder joining enabled (all remote audio lives in the same cache folder).
 	library_remote_track_t same_name[2];

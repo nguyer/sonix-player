@@ -15,6 +15,7 @@ from urllib.parse import parse_qs
 
 failed_sync = False
 slow_download = False
+removed_tracks = set()
 errors = []
 missing_art = True
 art_requests = {}
@@ -37,7 +38,13 @@ class CatalogServer(BaseHTTPRequestHandler):
 
     def do_GET(self):
         global failed_sync, missing_art, playlist_failure, slow_download
-        if self.path == "/navidrome/test-slow-download":
+        if self.path == "/navidrome/test-remove-track-13":
+            removed_tracks.add(13)
+        elif self.path == "/navidrome/test-remove-track-14":
+            removed_tracks.add(14)
+        elif self.path == "/navidrome/test-restore-tracks":
+            removed_tracks.clear()
+        elif self.path == "/navidrome/test-slow-download":
             slow_download = True
         elif self.path == "/navidrome/test-fail-next-sync":
             failed_sync = True
@@ -160,10 +167,10 @@ class CatalogServer(BaseHTTPRequestHandler):
                 return
             songs = [{"id": f"catalog-{i}", "title": f"{'Unpublished' if failed_sync else 'Catalog'} title {i}",
                       "artist": "Catalog artist", "albumArtist": "Catalog album artist", "genre": "Rock",
-                      "album": "Catalog album", "albumId": "catalog-album", "suffix": "flac",
+                      "album": "Catalog album " if i % 2 else " Catalog album", "albumId": "catalog-album", "suffix": "flac",
                       "coverArt": "shared-cover" if i < 50 else "missing-cover",
                       "duration": 180, "track": i + 1, "year": 2020, "discNumber": 2}
-                     for i in range(offset, min(offset + 50, 51))]
+                     for i in [n for n in range(51) if n not in removed_tracks][offset:offset + 50]]
             body = json.dumps({"subsonic-response": {"status": "ok", "searchResult3": {"song": songs}}}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -197,7 +204,7 @@ with tempfile.TemporaryDirectory(prefix="sonix-library-test-") as directory:
         ["pkg-config", "--libs", "sdl2", "freetype2", "opusfile", "wavpack"], text=True))
     subprocess.run(["g++", str(tmp / "test.o"), str(tmp / "main.o"), *objects,
                     *flags, "-lpthread", "-lm", "-ldl", "-lasound",
-                    "-Wl,--wrap=device_state_play_queue_index", "-Wl,--wrap=device_state_get", "-Wl,--wrap=library_index_open", "-Wl,--wrap=audio_get_status", "-Wl,--wrap=audio_get_current_file", "-Wl,--wrap=player_refresh_now_playing",
+                    "-Wl,--wrap=device_state_play_queue_index", "-Wl,--wrap=device_state_get", "-Wl,--wrap=library_index_open", "-Wl,--wrap=subsoniccache_fetch_offline", "-Wl,--wrap=library_offline_note", "-Wl,--wrap=library_offline_bytes", "-Wl,--wrap=audio_get_status", "-Wl,--wrap=audio_get_current_file", "-Wl,--wrap=player_refresh_now_playing",
                     "-Wl,--wrap=subsonicplaylists_sync_pending", "-Wl,--wrap=gui_notify_popup",
                     "-o", str(tmp / "test")],
                    cwd=root, check=True)

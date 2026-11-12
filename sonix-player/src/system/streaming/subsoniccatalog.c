@@ -1,3 +1,5 @@
+#include "streamturn.h"
+#include "src/system/audio/audio.h"
 #include "subsoniccatalog.h"
 #include "subsoniccache.h"
 #include "subsonicart.h"
@@ -5,7 +7,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
+static long long catalog_millis(void){struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return (long long)t.tv_sec*1000+t.tv_nsec/1000000;}
 static atomic_bool syncing;
 bool subsoniccatalog_busy(void) { return atomic_load(&syncing); }
 
@@ -26,6 +30,7 @@ static int sync_covers(subsonic_client_t *c, const char *root, const char *sourc
 }
 
 int subsoniccatalog_sync(subsonic_client_t *c, const char *root, const atomic_bool *cancel) {
+	long long began=catalog_millis(),fetch_ms=0,art_ms=0,publish_ms=0,cleanup_ms=0;
 	char source[33];
 	subsoniccache_source(c, source);
 	if (!root || !*root || !library_remote_begin(source)) {
@@ -54,16 +59,40 @@ int subsoniccatalog_sync(subsonic_client_t *c, const char *root, const atomic_bo
 			total = -1; break;
 		}
 		total += count;
-		if (count < 50) {
-			int missing = sync_covers(c, root, source, cancel);
-			if (missing < 0 || atomic_load(cancel) || !library_remote_publish(source)) {
-				snprintf(c->error, sizeof(c->error), "Library sync was interrupted; the previous catalog is unchanged."); total = -1;
-			} else if (missing) snprintf(c->error, sizeof(c->error), "%d cover(s) unavailable. Sync again to retry.", missing);
-			else c->error[0] = 0;
+        if(count<50){
+         fetch_ms=catalog_millis()-began;long long phase=catalog_millis();
+         int missing=sync_covers(c,root,source,cancel);art_ms=catalog_millis()-phase;phase=catalog_millis();
+         bool published=missing>=0 && !atomic_load(cancel) && library_remote_publish(source);
+         publish_ms=catalog_millis()-phase;phase=catalog_millis();
+         if(!published){snprintf(c->error,sizeof(c->error),"Library sync was interrupted; the previous catalog is unchanged.");total=-1;}
+         else if(subsoniccatalog_cleanup(c,root,cancel)<0)total=-1;
+         else if(missing)snprintf(c->error,sizeof(c->error),"%d cover(s) unavailable. Sync again to retry.",missing);
+         else c->error[0]=0;
+         cleanup_ms=catalog_millis()-phase;
 			break;
 		}
 	}
 	free(rows); free(songs);
+	fprintf(stderr,"Navidrome catalog sync: %d tracks, %lld ms (fetch %lld, artwork %lld, publish %lld, cleanup %lld)\n",total,catalog_millis()-began,fetch_ms,art_ms,publish_ms,cleanup_ms);
 	atomic_store(&syncing, false);
 	return total;
+}
+
+int subsoniccatalog_cleanup(subsonic_client_t *client,const char *root,const atomic_bool *cancel){
+ char source[33];subsoniccache_source(client,source);int removed=0;bool ok=true;
+ streamturn_acquire();
+ for(int offset=0;!atomic_load(cancel);){
+  library_remote_removed_t rows[20];int n=library_remote_removed(source,offset,rows,20),completed=0;
+  if(n<0){ok=false;break;}if(!n)break;
+  for(int i=0;i<n && !atomic_load(cancel);++i){
+   char current[512];audio_get_current_file(current,sizeof(current));
+   if(audio_get_status()!=AUDIO_STATUS_STOPPED && !strcmp(current,rows[i].path))continue;
+   if(!subsoniccache_remove_owned(client,root,rows[i].path,rows[i].id) || !library_remote_removed_done(source,rows[i].path)){ok=false;continue;}
+   ++completed;++removed;
+  }
+  offset+=n-completed;if(n<20)break;
+ }
+ streamturn_release();
+ if(!ok){snprintf(client->error,sizeof(client->error),"Catalog updated, but removed downloads could not all be cleaned up. Sync again to retry.");return -1;}
+ return removed;
 }

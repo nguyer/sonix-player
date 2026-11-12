@@ -59,4 +59,7 @@ bool subsonic_network_available(void);
 unsigned subsonic_availability_revision(void);
 void subsonic_set_availability_notify(void (*notify)(void));
 bool subsonic_server_available(const char *server,const char *username);
+// Display text only: opaque server IDs are never normalized.
+void subsonic_clean_text(char *text);
+void subsonic_song_normalize(subsonic_song_t *song);
 #endif

@@ -254,6 +254,7 @@ int subsonic_search_songs(subsonic_client_t *c, const char *query, int offset,
 		long track = json_obj_long(&doc, item, "track", 0);
 		s->duration = duration >= 0 && duration <= 2147483647L ? (int)duration : 0;
 		s->track = track >= 0 && track <= 2147483647L ? (int)track : 0;
+        subsonic_song_normalize(s);
 	}
 	json_free(&doc);
 	free(body);
@@ -345,4 +346,15 @@ bool subsonic_download_limited(subsonic_client_t *c,const char *id,const char *p
 	transfer_end(&stream);
 	if (!ok) { unlink(path); return fail(c, "Song download was interrupted or storage is full. Try again."); }
 	return true;
+}
+
+void subsonic_clean_text(char *text){
+ if(!text)return;
+ for(char *p=text;*p;++p)if((unsigned char)*p<0x20 || (unsigned char)*p==0x7f)*p=' ';
+ size_t length=strlen(text);while(length && text[length-1]==' ')text[--length]=0;
+ size_t lead=0;while(text[lead]==' ')++lead;if(lead)memmove(text,text+lead,length-lead+1);
+}
+void subsonic_song_normalize(subsonic_song_t *song){
+ subsonic_clean_text(song->title);subsonic_clean_text(song->artist);
+ subsonic_clean_text(song->album_artist);subsonic_clean_text(song->album);subsonic_clean_text(song->genre);
 }

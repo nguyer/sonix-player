@@ -87,12 +87,11 @@ fetched separately during catalog sync, as described below.
 
 The cache reserves space for a 512 MiB maximum track within a 1 GiB budget.
 This is deliberately conservative: new downloads stop once existing cache
-contents exceed 512 MiB. There is no automatic eviction or cache-management UI
-yet; remove old files from this cache directory while playback is stopped if
-it fills up. Pinned offline downloads are separate from this playback-cache budget. Interrupted files are deleted, and the audio file is published by
+contents exceed 512 MiB. There is no automatic quota eviction; use Remove download
+or Remove all downloads under Offline / cache settings if it fills up. Pinned offline downloads are separate from this playback-cache budget. Interrupted files are deleted, and the audio file is published by
 rename only after its metadata and identity have been written successfully.
 
-Select **Cancel download** to request cancellation. A blocked audio read is
+Select **Cancel sync** to request cancellation. A blocked audio read is
 woken; cancellation during connection setup can take the connection timeout.
 Requests waiting for another service's download turn must wait for that turn
 before completing cancellation. Transfers share the existing download turn,
@@ -332,13 +331,13 @@ Settings persist per server account. Configure a storage limit (or unlimited),
 a free-space reserve and optionally charging-only downloads. Automatic sync
 and its refresh interval are configured on the main Navidrome page and apply
 to catalog, artwork, playlists and any configured offline downloads. The main Navidrome **Sync** button refreshes the catalog and playlists, then
-downloads selected tracks. **Stop offline sync** keeps completed downloads.
+downloads selected tracks. **Cancel sync** keeps completed downloads.
 Foreground playback takes priority over background downloads.
 
-Removal of songs no longer selected is opt-in. It removes only identifiable
-server downloads pinned by offline sync, preserves local music, and avoids
-current/queued music. A library-backed queue conservatively protects downloads
-until that queue is cleared.
+Use the library's explicit Remove download actions to remove selected offline
+copies. Independently, a successful catalog sync automatically cleans up files
+for tracks removed from that server. Local music is preserved, and currently
+playing/paused removed files are deferred until playback stops.
 
 When server checks fail, uncached server tracks are dimmed and cannot be
 selected for playback. Next/previous playback skips them. Complete cached
@@ -420,3 +419,41 @@ queue cannot drop these state updates.
 One one-second maintenance timer remains for scheduled refresh/retry deadlines,
 playlist edit quiet periods, and temporary playback-file cleanup. Spinner
 animation and the application's existing GUI dispatch fallback remain separate.
+
+
+After a complete catalog has been fetched and committed successfully, downloads
+for tracks absent from that server catalog are deleted, including their pin,
+temporary, tag and identity sidecars. The offline manifest is cleared for those
+paths. This applies to explicit downloads and ordinary playback-cache copies;
+it is separate from removing an entry from a playlist or deselecting a download.
+
+Cleanup records are committed with the catalog and survive restart. Failed or
+cancelled catalog fetches do not create removal records. Each deletion verifies
+the account identity and deterministic cache path, preserving local music and
+other connections' files. Failed deletions remain queued for retry. A currently
+playing or paused file is deferred until playback no longer needs it; the
+existing maintenance worker then finishes cleanup.
+
+
+Unchanged offline downloads take a fast path: validated pinned copies with
+unchanged server size stamps skip fetching, pin rewrites and per-track manifest
+updates. Disk usage is reconciled once per pass rather than summed for every
+track. Fixed 100 ms inter-track pauses are removed; foreground requests still
+interrupt/yield through the existing download handoff. Sync logs report catalog
+fetch/artwork/publish/cleanup, playlist time, and cached versus fetched/promoted
+offline work. An unchanged catalog still requires server enumeration; timings
+help distinguish that network cost from local cache processing.
+
+
+Startup atomically restores remote metadata and reconciles album groups against
+all indexed tracks. Missing valid groups are recreated, and orphaned/NULL-key
+groups from older databases are removed. This prevents phantom “(no name)”
+albums after restart without requiring a network sync, while retaining local
+albums and separate same-titled server albums.
+
+
+Server display text uses the same boundary whitespace/control cleanup as local
+tags; song IDs and album IDs remain untouched. Startup normalizes persisted
+remote album names and restores both album name and server album key on existing
+media rows. This repairs albums split by trailing-space differences between
+server metadata and downloaded-file tags, and removes the empty legacy groups.

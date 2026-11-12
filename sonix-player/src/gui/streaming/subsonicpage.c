@@ -75,6 +75,7 @@ typedef struct {
 	bool playlists;
 	bool background;
 	bool probe;
+    bool prune;
     bool temporary;
 	char upload[201];
 	subsonic_song_t song;
@@ -97,7 +98,7 @@ static void submit_request(request_t *r);
 static void prepare_waiting(void);
 static void auto_sync_playlists(void);
 static void offline_and_probe_tick(void);
-static time_t probe_at,offline_retry_at;
+static time_t probe_at,offline_retry_at,cleanup_retry_at;
 static time_t auto_retry_at;
 static char auto_last_error[256];
 
@@ -140,7 +141,10 @@ static bool temporary_playback(void){
 static int sync_all(request_t *r) {
  int count=subsoniccatalog_sync(&r->client,r->root,&play_cancelled);
  if(count<0 || atomic_load(&play_cancelled))return -1;
- if(subsonicplaylists_sync(&r->client,&play_cancelled)<0)return -1;
+ struct timespec before,after;clock_gettime(CLOCK_MONOTONIC,&before);
+ int lists=subsonicplaylists_sync(&r->client,&play_cancelled);clock_gettime(CLOCK_MONOTONIC,&after);
+ fprintf(stderr,"Navidrome playlist sync: %d playlists, %lld ms\n",lists,(long long)(after.tv_sec-before.tv_sec)*1000+(after.tv_nsec-before.tv_nsec)/1000000);
+ if(lists<0)return -1;
  return count;
 }
 
@@ -156,9 +160,9 @@ static void *request_worker(void *arg) {
 	if(r->play)subsonicoffline_yield_begin();
 	if (r->play) streamturn_acquire();
 
- if((r->play || r->sync || r->playlists) && atomic_load(&play_cancelled)){
+ if((r->play || r->sync || r->playlists || r->prune) && atomic_load(&play_cancelled)){
   r->count=-1;snprintf(r->client.error,sizeof(r->client.error),"Sync cancelled.");
- } else r->count = r->probe ? (subsonic_ping(&r->client)?0:-1) : r->playlists ? (r->upload[0] ?
+ } else r->count = r->probe ? (subsonic_ping(&r->client)?0:-1) : r->prune ? subsoniccatalog_cleanup(&r->client,r->root,&play_cancelled) : r->playlists ? (r->upload[0] ?
 		(subsonicplaylists_upload(&r->client,r->upload,&play_cancelled)?0:-1) :
 		(r->background ? subsonicplaylists_sync_pending(&r->client,&play_cancelled) :
 		subsonicplaylists_sync(&r->client,&play_cancelled))) :
@@ -195,14 +199,14 @@ static void consume_result(void) {
  if(r->login)probe_at=time(NULL)+30;
  if(r->play && r->path[0])remember_temporary(&r->client,r->root,r->path);
 
- if((r->play || r->sync || r->playlists) && atomic_load(&play_cancelled)){
+ if((r->play || r->sync || r->playlists || r->prune) && atomic_load(&play_cancelled)){
   r->count=-1;snprintf(r->client.error,sizeof(r->client.error),"Sync cancelled.");
  }
 	if (r->count < 0) {
 		snprintf(message, sizeof(message), "%s", subsonic_last_error(&r->client));
 		if (r->login) { connected = false; clear_password(); }
 		if (r->resume_queue || !r->background) gui_notify_popup(message);
-		if(r->background){if(r->sync)offline_retry_at=time(NULL)+60;else auto_retry_at=time(NULL)+30;}
+		if(r->background){if(r->prune)cleanup_retry_at=time(NULL)+60;else if(r->sync)offline_retry_at=time(NULL)+60;else auto_retry_at=time(NULL)+30;}
 		if(r->background && strcmp(auto_last_error,message)) {
 			snprintf(auto_last_error,sizeof(auto_last_error),"%s",message);gui_notify_popup(message);
 		}
@@ -217,7 +221,9 @@ static void consume_result(void) {
 		saved_connection = subsonicaccount_save(config_path(), &account);
 		snprintf(message, sizeof(message), "%s", saved_connection ? "Connected." :
 			"Connected for this session. Could not save the connection; check the settings file location.");
-	} else if(r->playlists) {
+	} else if(r->prune) {
+        cleanup_retry_at=0;
+    } else if(r->playlists) {
 		if(r->background){auto_last_error[0]=0;auto_retry_at=0;}
 		if(r->upload[0]) snprintf(message,sizeof(message),"Playlist synchronized with Navidrome.");
 		else snprintf(message,sizeof(message),"%d Navidrome playlist(s) synchronized.",r->count);
@@ -246,7 +252,7 @@ static void consume_result(void) {
 			snprintf(message, sizeof(message), "Song ready.");
 		} else snprintf(message, sizeof(message), "Song saved. Select it again to start playback.");
 	}
-	if(r->play)subsonicpage_downloads_changed();
+	if(r->play || r->sync || r->prune)subsonicpage_downloads_changed();
 	subsonic_client_clear(&r->client);
 	free(r);
 	topbar_refresh_navidrome();
@@ -265,10 +271,20 @@ static void offline_event(void *unused){
  subsonicpage_downloads_changed();rebuild_home();subsonicofflinepage_notify();
  if(!busy)prepare_waiting();
 }
+static void start_pending_cleanup(void){
+ if(busy || subsonicoffline_busy() || !account.password[0] || time(NULL)<cleanup_retry_at)return;
+ const char *root=music_storage_root();if(!root || !gui_card_available())return;
+ char source[33],keep[512];subsoniccache_source(&account,source);audio_get_current_file(keep,sizeof(keep));
+ if(!library_remote_removed_pending(source,audio_get_status()==AUDIO_STATUS_STOPPED?NULL:keep))return;
+ request_t *r=calloc(1,sizeof(*r));if(!r)return;
+ r->client=account;r->prune=true;r->background=true;snprintf(r->root,sizeof(r->root),"%s",root);
+ cleanup_retry_at=time(NULL)+60;submit_request(r);
+}
 static void maintenance_tick(lv_timer_t *timer){
  (void)timer;
  discard_finished_temporary();
  if(!busy)prepare_waiting();
+ if(!busy)start_pending_cleanup();
  if(!busy)auto_sync_playlists();
  if(!busy)offline_and_probe_tick();
 }
@@ -301,7 +317,7 @@ static void start_request(bool login) {
 static void submit_request(request_t *r) {
 	busy = true;
 	busy_play = r->play;
-	busy_sync = r->sync || r->playlists;
+	busy_sync = r->sync || r->playlists || r->prune;
     topbar_refresh_navidrome();
 	atomic_store(&play_cancelled, false);
 	pthread_t thread;

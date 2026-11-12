@@ -10,7 +10,7 @@ typedef struct {
  int64_t max_bytes, reserve_bytes, last_run;
 } offline_options_t;
 typedef struct { char value[256], label[256]; bool selected; } offline_choice_t;
-typedef struct { char id[128], path[512]; int64_t bytes, stamp; int wanted, status; } offline_file_t;
+typedef struct { char id[128], path[512]; int64_t bytes, stamp, remote_bytes; int wanted, status; bool catalog_present; } offline_file_t;
 // Atomically change a group selection and individual exclusions.
 bool library_offline_select(const char *source,int kind,const char *value,const char (*ids)[128],int count,bool selected);
 bool library_offline_clear(const char *source);

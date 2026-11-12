@@ -11,7 +11,7 @@
 bool subsonic_track_available(const char *path){
  if(!path || !strstr(path,"/.local/subsonic-cache/"))return true;
  library_remote_track_t track;
- if(!library_remote_get(path,&track))return true;
+ if(!library_remote_get(path,&track)){struct stat local;return stat(path,&local)==0 && S_ISREG(local.st_mode) && local.st_size>0;}
  struct stat st;
  if(stat(path,&st)==0 && S_ISREG(st.st_mode) && st.st_size>0)return true;
  return subsonic_server_available(track.server,track.username);

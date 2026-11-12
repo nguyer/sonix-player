@@ -25,4 +25,5 @@ bool subsoniccache_mark_temporary(const char *path);
 bool subsoniccache_is_temporary(const char *path);
 bool subsoniccache_discard_temporary(const subsonic_client_t *client,const char *root,const char *path);
 void subsoniccache_cleanup_temporary(const subsonic_client_t *client,const char *root,const char *keep);
+bool subsoniccache_remove_owned(const subsonic_client_t *client,const char *root,const char *path,const char *id);
 #endif

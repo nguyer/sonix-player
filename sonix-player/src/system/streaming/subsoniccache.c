@@ -191,3 +191,26 @@ void subsoniccache_cleanup_temporary(const subsonic_client_t *client,const char 
  }
  closedir(dir);
 }
+
+bool subsoniccache_remove_owned(const subsonic_client_t *client,const char *root,const char *path,const char *id){
+ subsonic_song_t song={0};snprintf(song.id,sizeof(song.id),"%s",id);
+ const char *dot=strrchr(path,'.');if(!dot || strlen(dot+1)>=sizeof(song.suffix))return false;strcpy(song.suffix,dot+1);
+ char expected[512];if(!subsoniccache_path(client,&song,root,expected,sizeof(expected)) || strcmp(expected,path))return false;
+ struct stat st;bool exists=lstat(path,&st)==0;
+ if(exists && !S_ISREG(st.st_mode))return false;
+ if(!exists && errno!=ENOENT)return false;
+ const char *suffixes[]={".offline",".temporary",".part",".tags.tmp",".identity.tmp",".tags",".identity"};
+ subsonic_identity_t identity;
+ if(!subsoniccache_identity(path,&identity)){
+  if(exists)return false;
+  for(unsigned i=0;i<sizeof(suffixes)/sizeof(suffixes[0]);++i){char side[560];snprintf(side,sizeof(side),"%s%s",path,suffixes[i]);if(lstat(side,&st)==0 || errno!=ENOENT)return false;}
+  return true;
+ }
+ if(strcmp(identity.server,client->base_url) || strcmp(identity.username,client->username) || strcmp(identity.song_id,id))return false;
+ if(exists && unlink(path)!=0)return false;
+ // Keep identity until last: failed/interrupted removal can be retried safely.
+ for(unsigned i=0;i<sizeof(suffixes)/sizeof(suffixes[0]);++i){
+  char side[560];snprintf(side,sizeof(side),"%s%s",path,suffixes[i]);if(unlink(side)!=0 && errno!=ENOENT)return false;
+ }
+ return true;
+}
