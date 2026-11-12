@@ -15,11 +15,15 @@
 #include "src/system/core/config.h"
 #include "src/system/streaming/subsonic.h"
 #include "src/system/streaming/subsoniccache.h"
+#include "src/system/streaming/subsonicaccount.h"
+#include "src/system/streaming/subsoniccatalog.h"
+#include "src/system/library/libraryremote.h"
 #include "src/system/streaming/streamturn.h"
 #include "src/system/playback/device_state.h"
 #include "src/system/playback/playlist.h"
 #include "src/system/device/system.h"
 #include "src/gui/nowplaying/player.h"
+#include <sys/stat.h>
 
 #define PAGE_SIZE 20
 lv_obj_t *subsonic_screen;
@@ -42,6 +46,8 @@ static const char *music_storage_root(void) {
 }
 static bool connected, busy;
 static bool busy_play;
+static bool busy_sync, saved_connection;
+static char waiting_path[512];
 static atomic_bool play_cancelled;
 static char message[256] = "Enter your server and account details.";
 static int editing, page_offset, page_count;
@@ -53,6 +59,7 @@ typedef struct {
 	subsonic_client_t client;
 	bool login;
 	bool play;
+	bool sync, resume_queue;
 	subsonic_song_t song;
 	char root[512], path[512];
 	unsigned queue_revision;
@@ -67,6 +74,8 @@ static request_t *completed;
 static void rebuild_home(void);
 static void rebuild_results(void);
 static void start_request(bool login, int offset, int play_index);
+static void submit_request(request_t *r);
+static void prepare_waiting(void);
 
 static bool ignore_tap(void) { return busy || switcher_back_drag_active(); }
 
@@ -81,7 +90,8 @@ static void *request_worker(void *arg) {
 	if (r->play && atomic_load(&play_cancelled)) {
 		r->count = -1;
 		snprintf(r->client.error, sizeof(r->client.error), "Song download cancelled.");
-	} else r->count = r->play ? (subsoniccache_fetch(&r->client, &r->song, r->root, r->path, sizeof(r->path)) ? 0 : -1) :
+	} else r->count = r->sync ? subsoniccatalog_sync(&r->client, r->root, &play_cancelled) :
+		r->play ? (subsoniccache_fetch(&r->client, &r->song, r->root, r->path, sizeof(r->path)) ? 0 : -1) :
 		r->login ? (subsonic_ping(&r->client) ? 0 : -1) :
 		subsonic_search_songs(&r->client, r->query, r->offset, r->songs, PAGE_SIZE);
 	if (r->play) streamturn_release();
@@ -97,9 +107,10 @@ static void result_tick(lv_timer_t *timer) {
 	request_t *r = completed;
 	completed = NULL;
 	pthread_mutex_unlock(&result_lock);
-	if (!r) return;
+	if (!r) { if (!busy) prepare_waiting(); return; }
 	busy = false;
 	busy_play = false;
+	busy_sync = false;
 	if (r->play && atomic_load(&play_cancelled)) {
 		r->count = -1;
 		snprintf(r->client.error, sizeof(r->client.error), "Song download cancelled.");
@@ -107,6 +118,7 @@ static void result_tick(lv_timer_t *timer) {
 	if (r->count < 0) {
 		snprintf(message, sizeof(message), "%s", subsonic_last_error(&r->client));
 		if (r->login) { connected = false; clear_password(); }
+		if (r->resume_queue) gui_notify_popup(message);
 	} else if (r->login) {
 		subsonic_client_clear(&account);
 		account = r->client;
@@ -114,17 +126,25 @@ static void result_tick(lv_timer_t *timer) {
 		clear_password();
 		config_set("subsonic", "server", server);
 		config_set("subsonic", "username", username);
-		snprintf(message, sizeof(message), "%s", config_save() ? "Connected. Search for songs to browse your library." :
-			"Connected. Could not save the server and username.");
+		config_save();
+		saved_connection = subsonicaccount_save(config_path(), &account);
+		snprintf(message, sizeof(message), "%s", saved_connection ? "Connected. Connection saved on this device." :
+			"Connected for this session. Could not save the connection; check the settings file location.");
+	} else if (r->sync) {
+		snprintf(message, sizeof(message), "Library updated: %d songs. %.170s", r->count, r->client.error);
+		library_reorganize();
 	} else if (r->play) {
-		bool foreground = lv_screen_active() == results_screen || lv_screen_active() == subsonic_screen;
+		bool foreground = r->resume_queue || lv_screen_active() == results_screen || lv_screen_active() == subsonic_screen;
 		const char *root = music_storage_root();
 		if (foreground && gui_card_available() && root && !strcmp(root, r->root) &&
 			playlist_revision() == r->queue_revision && playlist_current_index() == r->queue_index) {
-			const char *paths[] = {r->path};
-			device_state_play_list(paths, 1, 0);
+			if (r->resume_queue) device_state_play_queue_index(r->queue_index);
+			else {
+				const char *paths[] = {r->path};
+				device_state_play_list(paths, 1, 0);
+			}
 			player_refresh_now_playing();
-			switch_screen(player_screen);
+			if (!r->resume_queue) switch_screen(player_screen);
 			snprintf(message, sizeof(message), "Song ready.");
 		} else snprintf(message, sizeof(message), "Song saved. Select it again to start playback.");
 	} else {
@@ -133,7 +153,7 @@ static void result_tick(lv_timer_t *timer) {
 		memcpy(page, r->songs, sizeof(page));
 		snprintf(message, sizeof(message), "Connected.");
 	}
-	bool show_results = !r->login && !r->play && r->count >= 0;
+	bool show_results = !r->login && !r->play && !r->sync && r->count >= 0;
 	subsonic_client_clear(&r->client);
 	free(r);
 	rebuild_home();
@@ -150,8 +170,11 @@ static void start_request(bool login, int offset, int play_index) {
 	r->login = login;
 	r->offset = offset;
 	r->play = play_index >= 0;
+	r->sync = !login && offset == -1 && !r->play;
 	if (login) {
-		if (!subsonic_client_init(&r->client, server, username, password)) {
+		bool restored = !password[0] && subsonicaccount_load(config_path(), &r->client) &&
+			!strcmp(r->client.base_url, server) && !strcmp(r->client.username, username);
+		if (!restored && !subsonic_client_init(&r->client, server, username, password)) {
 			snprintf(message, sizeof(message), "%s", subsonic_last_error(&r->client));
 			subsonic_client_clear(&r->client); free(r); rebuild_home(); return;
 		}
@@ -159,6 +182,13 @@ static void start_request(bool login, int offset, int play_index) {
 		if (!connected) { free(r); return; }
 		r->client = account;
 		snprintf(r->query, sizeof(r->query), "%s", query);
+		if (r->sync) {
+			const char *root = music_storage_root();
+			if (!root || strlen(root) >= sizeof(r->root)) {
+				subsonic_client_clear(&r->client); free(r); return;
+			}
+			strcpy(r->root, root);
+		}
 		if (play_index >= 0) {
 			const char *root = music_storage_root();
 			if (play_index >= page_count || !gui_card_available() || !root || !*root || strlen(root) >= sizeof(r->root)) {
@@ -172,23 +202,66 @@ static void start_request(bool login, int offset, int play_index) {
 			r->queue_index = playlist_current_index();
 		}
 	}
+	submit_request(r);
+}
+
+static void submit_request(request_t *r) {
 	busy = true;
 	busy_play = r->play;
+	busy_sync = r->sync;
 	atomic_store(&play_cancelled, false);
 	pthread_t thread;
 	int error = pthread_create(&thread, NULL, request_worker, r);
 	if (error) {
 		busy = false;
 		busy_play = false;
+		busy_sync = false;
 		subsonic_client_clear(&r->client); free(r);
 		snprintf(message, sizeof(message), "Could not start the connection worker.");
 	} else {
 		pthread_detach(thread);
-		snprintf(message, sizeof(message), "%s", login ? "Connecting..." :
-			play_index >= 0 ? "Downloading song before playback..." : "Searching...");
+		snprintf(message, sizeof(message), "%s", r->login ? "Connecting..." :
+			r->sync ? "Syncing the Navidrome catalog and artwork..." : r->play ? "Downloading song before playback..." : "Searching...");
 	}
 	rebuild_home();
 	rebuild_results();
+}
+
+static bool prepare_track(const char *path) {
+	library_remote_track_t remote;
+	if (!library_remote_get(path, &remote)) return true;
+	struct stat st;
+	if (stat(path, &st) == 0 && st.st_size > 0) return true;
+	snprintf(waiting_path, sizeof(waiting_path), "%s", path);
+	device_state_stop();
+	if (busy_play) { atomic_store(&play_cancelled, true); subsonic_download_cancel(); }
+	return false;
+}
+
+static void prepare_waiting(void) {
+	if (!waiting_path[0]) return;
+	char current[512];
+	if (!playlist_current_path(current, sizeof(current)) || strcmp(current, waiting_path)) { waiting_path[0] = 0; return; }
+	library_remote_track_t remote;
+	bool found = library_remote_get(waiting_path, &remote);
+	waiting_path[0] = 0;
+	if (!found) return;
+	request_t *r = calloc(1, sizeof(*r));
+	if (!r) { gui_notify_popup("Not enough memory to prepare this song."); return; }
+	r->client = account;
+	if (!r->client.password[0]) subsonicaccount_load(config_path(), &r->client);
+	if (!r->client.password[0] || strcmp(r->client.base_url, remote.server) || strcmp(r->client.username, remote.username)) {
+		gui_notify_popup("Connect to this song's Navidrome account before playing it.");
+		subsonic_client_clear(&r->client); free(r); return;
+	}
+	const char *root = music_storage_root();
+	if (!root || !gui_card_available() || strlen(root) >= sizeof(r->root)) {
+		gui_notify_popup("Music storage is unavailable."); subsonic_client_clear(&r->client); free(r); return;
+	}
+	r->song = remote.song; r->play = true; r->resume_queue = true;
+	strcpy(r->root, root);
+	r->queue_revision = playlist_revision(); r->queue_index = playlist_current_index();
+	submit_request(r);
 }
 
 static void connect_cb(lv_event_t *e) { (void)e; if (!ignore_tap()) start_request(true, 0, -1); }
@@ -204,6 +277,24 @@ static void disconnect_cb(lv_event_t *e) {
 	query[0] = 0;
 	snprintf(message, sizeof(message), "Disconnected. Enter your password to reconnect.");
 	rebuild_home(); rebuild_results();
+}
+
+static void sync_cb(lv_event_t *e) {
+	(void)e;
+	if (!ignore_tap()) start_request(false, -1, -1);
+}
+
+static void forget_cb(lv_event_t *e) {
+	if (ignore_tap()) return;
+	if (!subsonicaccount_forget(config_path())) {
+		snprintf(message, sizeof(message), "Could not remove the saved connection."); rebuild_home(); return;
+	}
+	saved_connection = false;
+	disconnect_cb(e);
+	server[0] = username[0] = 0;
+	config_set("subsonic", "server", ""); config_set("subsonic", "username", ""); config_save();
+	snprintf(message, sizeof(message), "Saved connection forgotten. Library entries and downloaded songs are kept.");
+	rebuild_home();
 }
 
 static void edit_accept(lv_event_t *e) {
@@ -260,10 +351,10 @@ static void results_cb(lv_event_t *e) {
 
 static void cancel_cb(lv_event_t *e) {
 	(void)e;
-	if (!busy_play || switcher_back_drag_active()) return;
+	if ((!busy_play && !busy_sync) || switcher_back_drag_active()) return;
 	atomic_store(&play_cancelled, true);
 	subsonic_download_cancel();
-	snprintf(message, sizeof(message), "Cancelling song download...");
+	snprintf(message, sizeof(message), "Cancelling...");
 	rebuild_home(); rebuild_results();
 }
 
@@ -272,10 +363,12 @@ static void rebuild_home(void) {
 	settingsrow_heading(home, message);
 	if (busy) {
 		if (busy_play) settingsrow_action(home, "Cancel download", cancel_cb, NULL);
+		if (busy_sync) settingsrow_action(home, "Cancel sync", cancel_cb, NULL);
 		return;
 	}
 	if (connected) {
 		settingsrow_action(home, "Search songs", edit_cb, (void *)(intptr_t)3);
+		settingsrow_action(home, "Sync catalog to music library", sync_cb, NULL);
 		if (query[0]) settingsrow_action(home, "Search results", results_cb, NULL);
 		settingsrow_action(home, "Disconnect", disconnect_cb, NULL);
 	} else {
@@ -285,10 +378,11 @@ static void rebuild_home(void) {
 		settingsrow_add(home, "Username", &value, edit_cb, (void *)(intptr_t)1);
 		lv_label_set_text(value, username[0] ? username : "Not set");
 		settingsrow_add(home, "Password", &value, edit_cb, (void *)(intptr_t)2);
-		lv_label_set_text(value, password[0] ? "Entered" : "Not set");
+		lv_label_set_text(value, password[0] ? "Entered" : saved_connection ? "Saved on device" : "Not set");
 		settingsrow_action(home, "Connect", connect_cb, NULL);
-		settingsrow_heading(home, "Use your server root URL. Passwords are kept only until disconnect or exit.");
+		settingsrow_heading(home, "Use your server root URL. Connecting saves the account on this device.");
 	}
+	if (saved_connection) settingsrow_action(home, "Forget saved connection", forget_cb, NULL);
 }
 
 static void rebuild_results(void) {
@@ -296,6 +390,7 @@ static void rebuild_results(void) {
 	if (busy) {
 		settingsrow_heading(results, message);
 		if (busy_play) settingsrow_action(results, "Cancel download", cancel_cb, NULL);
+		if (busy_sync) settingsrow_action(results, "Cancel sync", cancel_cb, NULL);
 		return;
 	}
 	settingsrow_heading(results, message);
@@ -319,6 +414,10 @@ void subsonicpage_init(gui_config_t *cfg) {
 	streamturn_register_abandon(subsonic_download_cancel);
 	snprintf(server, sizeof(server), "%s", config_get("subsonic", "server", ""));
 	snprintf(username, sizeof(username), "%s", config_get("subsonic", "username", ""));
+	saved_connection = subsonicaccount_load(config_path(), &account);
+	if (saved_connection) {
+		strcpy(server, account.base_url); strcpy(username, account.username);
+	}
 	subsonic_screen = lv_obj_create(NULL);
 	home = settingsrow_page(subsonic_screen, cfg, "Navidrome");
 	switcher_attach_back_gesture(subsonic_screen);
@@ -341,5 +440,7 @@ void subsonicpage_init(gui_config_t *cfg) {
 	lv_obj_add_event_cb(editor, editor_left, LV_EVENT_SCREEN_UNLOADED, NULL);
 	switcher_attach_back_gesture(editor);
 	lv_timer_create(result_tick, 50, NULL);
+	device_state_add_prepare_cb(prepare_track);
 	rebuild_home(); rebuild_results();
+	if (saved_connection) start_request(true, 0, -1);
 }

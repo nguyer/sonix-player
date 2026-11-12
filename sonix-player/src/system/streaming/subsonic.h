@@ -24,6 +24,8 @@ typedef struct {
 	int duration;
 	int track;
 	char suffix[16]; // original audio container, from the server
+	char album_artist[256], genre[128];
+	int year, disc;
 } subsonic_song_t;
 
 // Rejects unsupported URLs, embedded credentials, and oversized input rather
@@ -43,5 +45,7 @@ bool subsonic_download(subsonic_client_t *client, const char *song_id, const cha
 // Thread-safe cancellation and power-management status for the active transfer.
 void subsonic_download_cancel(void);
 bool subsonic_download_busy(void);
+// Fetch a bounded JPEG/PNG cover (caller frees *data). Worker-only.
+bool subsonic_cover(subsonic_client_t *client, const char *cover_id, char **data, size_t *size);
 
 #endif

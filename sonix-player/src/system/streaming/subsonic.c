@@ -133,6 +133,29 @@ bool subsonic_ping(subsonic_client_t *c) {
 	return true;
 }
 
+bool subsonic_cover(subsonic_client_t *c, const char *id, char **data, size_t *size) {
+	*data = NULL;
+	*size = 0;
+	if (!id || !*id || strlen(id) >= 128) return fail(c, "Invalid cover ID.");
+	char encoded[384], params[420], form[4096], url[640];
+	http_url_encode(id, encoded, sizeof(encoded));
+	snprintf(params, sizeof(params), "&id=%s&size=512", encoded);
+	if (!auth_form(c, params, form, sizeof(form))) return false;
+	snprintf(url, sizeof(url), "%s/rest/getCoverArt.view", c->base_url);
+	http_req_t req = {.method="POST", .body=form};
+	int status = 0;
+	const size_t limit = 2 * 1024 * 1024;
+	if (!http_request(url, &req, data, size, limit, 15, &status)) return fail(c, "Cannot fetch album artwork.");
+	bool jpeg = *size >= 4 && !memcmp(*data, "\xff\xd8", 2) && !memcmp(*data + *size - 2, "\xff\xd9", 2);
+	bool png = *size >= 20 && !memcmp(*data, "\x89PNG\r\n\x1a\n", 8) &&
+		!memcmp(*data + *size - 12, "\0\0\0\0IEND", 8);
+	if (status != 200 || *size >= limit || (!jpeg && !png)) {
+		free(*data); *data = NULL; *size = 0;
+		return fail(c, "Server returned invalid or oversized album artwork.");
+	}
+	return true;
+}
+
 int subsonic_search_songs(subsonic_client_t *c, const char *query, int offset,
 						 subsonic_song_t *songs, int capacity) {
 	if (!query || strlen(query) > 512 || offset < 0 || !songs || capacity < 1 || capacity > 500) {
@@ -174,6 +197,10 @@ int subsonic_search_songs(subsonic_client_t *c, const char *query, int offset,
 		json_obj_str(&doc, item, "album", s->album, sizeof(s->album));
 		json_obj_str(&doc, item, "coverArt", s->cover_id, sizeof(s->cover_id));
 		json_obj_str(&doc, item, "suffix", s->suffix, sizeof(s->suffix));
+		json_obj_str(&doc, item, "albumArtist", s->album_artist, sizeof(s->album_artist));
+		json_obj_str(&doc, item, "genre", s->genre, sizeof(s->genre));
+		s->year = (int)json_obj_long(&doc, item, "year", 0);
+		s->disc = (int)json_obj_long(&doc, item, "discNumber", 1);
 		long duration = json_obj_long(&doc, item, "duration", 0);
 		long track = json_obj_long(&doc, item, "track", 0);
 		s->duration = duration >= 0 && duration <= 2147483647L ? (int)duration : 0;

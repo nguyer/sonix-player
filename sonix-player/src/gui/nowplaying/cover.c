@@ -14,6 +14,7 @@
 #include "src/system/db/sqlite3.h"
 
 #include "src/system/library/albumart.h"
+#include "src/system/streaming/subsonicart.h"
 #include "src/system/streaming/podcastcache.h"
 #include "src/system/image/art_shrink.h"
 #include "src/system/image/jpeg_planes.h"
@@ -2026,6 +2027,10 @@ void cover_set_cache_dir(const char *sd_root) {
 // and timestamp go into it: replacing a cover.jpg invalidates the thumbnail
 // without anybody having to clear the cache.
 static uint64_t thumb_hash(const char *path, int box, bool is_dir) {
+	// A cover fetched for an unplayed remote track must invalidate an earlier
+	// cached "no picture" result, even though the audio path still doesn't exist.
+	char remote_cover[640];
+	if (!is_dir && subsonicart_for_track(path, remote_cover, sizeof(remote_cover))) path = remote_cover;
 	struct stat st;
 	uint64_t h = 1469598103934665603ULL;
 

@@ -6,6 +6,7 @@
 #include "src/system/decode/apedec.h"
 #include "src/system/library/oggtags.h"
 #include "src/system/core/utils.h"
+#include "src/system/streaming/subsonicart.h"
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -1199,6 +1200,12 @@ bool albumart_load_candidate(const char *filepath, int index, albumart_t *out) {
 	if (index == 0) {
 		return read_embedded(filepath, out);
 	}
+
+	// Remote catalog tracks have no audio yet. Their account-scoped album cover
+	// is fetched during metadata sync and remains usable independently of audio.
+	char remote_cover[640];
+	if (index == 1 && subsonicart_for_track(filepath, remote_cover, sizeof(remote_cover)) &&
+		read_whole_file(remote_cover, out)) return true;
 
 	// A cover image file sitting next to the track.
 	char dirpath[1024];

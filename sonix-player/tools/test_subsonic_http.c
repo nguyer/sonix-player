@@ -37,6 +37,10 @@ int main(int argc, char **argv) {
 	subsonic_client_t c;
 	assert(subsonic_client_init(&c, argv[1], "test+user", "test-password"));
 	assert(subsonic_ping(&c));
+	char *bad_cover = NULL;
+	size_t bad_cover_size = 0;
+	assert(!subsonic_cover(&c, "invalid-cover", &bad_cover, &bad_cover_size));
+	assert(!bad_cover && !bad_cover_size);
 	subsonic_song_t songs[2];
 	assert(subsonic_search_songs(&c, "AC/DC & live", 10, songs, 2) == 1);
 	assert(!strcmp(songs[0].id, "server-song-1"));

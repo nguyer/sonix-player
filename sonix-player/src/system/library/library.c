@@ -1,4 +1,5 @@
 #include "library.h"
+#include "libraryremote.h"
 
 #include "src/system/library/audiobookdb.h"
 #include "src/system/playback/playlist.h"
@@ -52,6 +53,13 @@
 #define FORMAT_APE 9
 
 static const char *const SCHEMA[] = {
+	"CREATE TABLE IF NOT EXISTS REMOTE_MEDIA(path TEXT PRIMARY KEY,source TEXT,server TEXT,username TEXT,"
+	"remote_id TEXT,album_id TEXT,title TEXT,artist TEXT,album TEXT,cover_id TEXT,duration INT,track INT,suffix TEXT,"
+	"sortkey TEXT,character TEXT,album_key TEXT,album_artist TEXT,genre TEXT,year INT,disc INT)",
+	"CREATE INDEX IF NOT EXISTS remote_media_source ON REMOTE_MEDIA(source)",
+	"CREATE TABLE IF NOT EXISTS REMOTE_STAGE(path TEXT PRIMARY KEY,source TEXT,server TEXT,username TEXT,"
+	"remote_id TEXT,album_id TEXT,title TEXT,artist TEXT,album TEXT,cover_id TEXT,duration INT,track INT,suffix TEXT,"
+	"sortkey TEXT,character TEXT,album_key TEXT,album_artist TEXT,genre TEXT,year INT,disc INT)",
 	"CREATE TABLE IF NOT EXISTS MEDIA_TABLE(id INT,path TEXT COLLATE NOCASE,name TEXT COLLATE NOCASE,"
 	"album TEXT COLLATE NOCASE,artist TEXT COLLATE NOCASE,genre TEXT COLLATE NOCASE,year INT,dis_id INT,ck_id INT,"
 	"has_child_file INT,begin_time INT,end_time INT,cue_id INT,character TEXT COLLATE NOCASE,size INT,"
@@ -305,6 +313,7 @@ static const char *const SORT_INDEXES[] = {
 
 static sqlite3 *db;
 static pthread_mutex_t db_lock = PTHREAD_MUTEX_INITIALIZER;
+static bool remote_restore(void);
 
 // Bumped whenever a row's identity can have changed underneath a list that is
 // already open.
@@ -1411,6 +1420,7 @@ bool library_open(const char *db_path) {
 	}
 
 	pthread_mutex_lock(&db_lock);
+	remote_restore(); // recover remote rows even after an interrupted local scan
 	links_check();
 	bump_all_generations(); // a different card is a different set of row ids
 	pthread_mutex_unlock(&db_lock);
@@ -4346,7 +4356,10 @@ static uint32_t join_folder_hash(const char *path) {
 // rows took a new key, -1 when memory ran out.
 static int album_join_one(const char *album) {
 	sqlite3_stmt *read = NULL;
-	if (sqlite3_prepare_v2(db, "SELECT rowid, album_artist, path, album_key FROM MEDIA_TABLE WHERE album = ?1", -1,
+	// Remote albums already have a server/account/album identity. Local folder
+	// joining must neither replace that key nor merge distinct server albums.
+	if (sqlite3_prepare_v2(db, "SELECT rowid, album_artist, path, album_key FROM MEDIA_TABLE "
+						   "WHERE album = ?1 AND NOT EXISTS(SELECT 1 FROM REMOTE_MEDIA r WHERE r.path=MEDIA_TABLE.path)", -1,
 						   &read, NULL) != SQLITE_OK) {
 		return 0;
 	}
@@ -5110,6 +5123,8 @@ static void scan_directory(const char *path, int depth) {
 
 static void prune_links(void);
 static void prune_names(void);
+static bool remote_restore(void);
+#include "libraryremote.inc"
 
 // A scan: the tables emptied, the card walked, every file read.
 static void full_scan_run(void) {
@@ -5154,6 +5169,7 @@ static void full_scan_run(void) {
 		exec("COMMIT");
 	}
 	finalize_statements();
+	if (!scan_db_failed) remote_restore();
 
 	if (cue_claimed_rows && !scan_db_failed) {
 		prune_links();
@@ -5164,7 +5180,7 @@ static void full_scan_run(void) {
 	// One row so the count is readable without walking the table.
 	exec("DELETE FROM COUNT_TABLE");
 	char sql[128];
-	snprintf(sql, sizeof(sql), "INSERT INTO COUNT_TABLE(cn) VALUES(%d)", scan_found);
+	snprintf(sql, sizeof(sql), "INSERT INTO COUNT_TABLE(cn) SELECT COUNT(*) FROM MEDIA_TABLE");
 	exec(sql);
 
 	// Nothing is going to read the index for a while; give the cache back
@@ -6576,6 +6592,9 @@ static void *scan_thread_func(void *arg) {
 		break;
 	case SCAN_UPDATE:
 		update_run();
+		pthread_mutex_lock(&db_lock);
+		if (db && !scan_db_failed) remote_restore();
+		pthread_mutex_unlock(&db_lock);
 		if (update_outcome == LIBRARY_UPDATE_FINISHED && !scan_cancel && !scan_db_failed) {
 			playlists_follow_library();
 		}

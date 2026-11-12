@@ -54,6 +54,14 @@ class Handler(BaseHTTPRequestHandler):
             assert salt not in seen_salts
             seen_salts.add(salt)
             token = hashlib.md5(("test-password" + salt).encode()).hexdigest()
+            if self.path == "/navidrome/rest/getCoverArt.view":
+                assert form["id"] == ["invalid-cover"]
+                assert form["t"] == [token]
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"subsonic-response":{"status":"failed"}}')
+                return
             if self.path == "/navidrome/rest/download.view":
                 assert form["t"] == [token]
                 song_id = form["id"][0]
@@ -116,7 +124,7 @@ with tempfile.TemporaryDirectory(prefix="sonix-http-test-") as directory:
         subprocess.run([executable, f"http://127.0.0.1:{server.server_port}/navidrome", directory],
                        check=True, timeout=30)
         assert not errors, errors
-        assert len(seen_salts) == 10
+        assert len(seen_salts) == 11
         assert download_count == 5
         cached = list(Path(directory).glob(".local/subsonic-cache/*.wav"))
         assert len(cached) == 2

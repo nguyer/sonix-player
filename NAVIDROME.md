@@ -13,8 +13,9 @@ credentials do not appear in URL paths logged by the HTTP client. Use the final
 server root address, including any reverse-proxy prefix, without `/rest`.
 Prefer HTTPS: authentication tokens are replayable if intercepted over HTTP.
 
-Contexts retain credentials only in memory and must be cleared on logout. No
-account settings are persisted yet. Callers must serialize access to a context
+API contexts retain credentials in memory and must be cleared on logout. The UI
+now persists the account separately as described in the fourth milestone below.
+Callers must serialize access to a context
 and perform network calls on a worker thread. Callers must ignore the output
 array when a search returns -1. Song IDs remain opaque strings.
 
@@ -39,11 +40,11 @@ per page and Previous/Next actions. Selecting a song downloads it and starts
 playback as described below. The last full page may offer Next even when
 the following page is empty.
 
-Only the server URL and username are saved, after a successful connection. The
-password is kept in the account's memory until disconnect or process exit;
-restarting requires entering it again. **Disconnect** clears account credentials,
-search results and the query. The editor masks passwords and clears its text
-when it is left. New screen labels are currently English.
+Successful connections are now saved and restored automatically (fourth
+milestone). **Disconnect** clears the in-memory account, search results and
+query; **Forget saved connection** also deletes saved credentials. The editor
+masks passwords and clears its text when it is left. New screen labels are
+currently English.
 
 Network requests run on a worker thread with one request at a time. The UI
 consumes completed snapshots on its own thread. Account edits and additional
@@ -79,8 +80,8 @@ Files are stored under `<music-storage-root>/.local/subsonic-cache/`. Cache keys
 include the server root, username and opaque song ID, and a credential-free
 `.identity` sidecar preserves that association across restarts. Title, artist,
 album and track number are supplied through the existing `.tags` metadata path.
-Cached tracks can be selected again without downloading them. Artwork is not
-downloaded yet.
+Cached tracks can be selected again without downloading them. Artwork is now
+fetched separately during catalog sync, as described below.
 
 The cache reserves space for a 512 MiB maximum track within a 1 GiB budget.
 This is deliberately conservative: new downloads stop once existing cache
@@ -111,12 +112,101 @@ startup check pass; audible playback against a live server is not yet verified.
 ## Remaining integration
 
 1. Album, artist and playlist browsing beyond the current song search.
-2. Playback before download completion, multi-song queueing, artwork and cache
-   management. Persist server identity in the unified library database.
+2. Playback before download completion and cache management. Search
+   results still play one selected song; ordinary library queues support multiple
+   remote tracks through the preparation hook.
 3. Now-playing and scrobble events only for tracks with server identity, with
    durable offline replay. Manually added local tracks produce no server events.
 4. A shared resumable download engine supporting both full-library mirroring
    and selective synchronization of albums, artists, playlists and favorites.
 
-Playback during download, persistent catalog, automatic synchronization and
-scrobbling are not enabled yet.
+Playback during download, automatic synchronization of audio files and scrobbling
+are not enabled yet.
+
+## Fourth milestone: saved account and unified remote library
+
+1. Restart the rebuilt simulator and connect once to save the account.
+2. Choose **Streaming > Navidrome > Sync catalog to music library**.
+3. Browse the normal Music views (tracks, albums, artists, album artists, genres
+   and search). Remote metadata appears beside local files, without downloading
+   the audio. Matching titles are separate tracks; no local-file matching occurs.
+4. Play from those views normally. Missing remote audio downloads on a worker,
+   then the same library queue resumes at the selected position. Album queues
+   keep their remaining tracks. Cached audio can play without a connection.
+
+Catalog refresh is manual. It enumerates paginated `search3` with an empty query
+(the OpenSubsonic catalog enumeration behavior). Pages are staged in SQLite;
+only a successful complete enumeration replaces that account's visible catalog.
+Cancellation, network errors and concurrent library scans leave the previous
+catalog available. Full scans and Detect changes restore remote entries from
+their persisted metadata table, independent of whether audio is cached.
+
+The catalog records server, account, opaque song and album IDs, source-scoped
+cache paths, title, artist, album artist, genre, year, disc and track numbers.
+There are no empty audio placeholder files. Local-only tracks never pass through
+the Navidrome download path. This does not add scrobbling or full-library audio
+mirroring yet, and the existing bounded audio cache still applies.
+
+The saved account is `<SONIX_CONFIG>.subsonic-account` (on the device, beside
+`/usr/data/device_config.ini`). It is written atomically with owner-only `0600`
+permissions and contains reusable credentials **without encryption**. In the
+simulator, keep using the same persistent `SONIX_CONFIG` path between runs.
+If no settings path is configured or storage is unwritable, the UI explicitly
+reports that the connection is available only for the session.
+
+The saved account is authenticated in the background at startup. A temporary
+network failure does not erase it; Connect retries with the saved credentials.
+**Forget saved connection** removes the saved account and disconnects, retaining
+catalog metadata and downloaded audio. Uncached songs then require reconnecting
+to the matching account; downloaded songs remain playable.
+
+Run the unified-library checks after building:
+
+```sh
+python3 sonix-player/tools/test_subsonic_library.py
+```
+
+This uses isolated settings, a temporary library database, a loopback server and
+the real account/catalog/library/UI-preparation code. It verifies restricted
+account-file permissions, automatic login from saved credentials, two-page
+catalog sync, failed/cancelled sync preservation, metadata persistence, full and
+incremental rescans, local-file preservation, queued remote download, offline
+cache reuse and account deletion. The final playback handoff is wrapped to
+avoid producing sound; manual verification of the new library UI remains needed.
+
+## Fifth milestone: artwork before playback
+
+Catalog sync now fetches one 512-pixel cover for each distinct cover ID (falling
+back to album ID), with requests authenticated using POST forms. Shared covers
+are kept separately under `.local/subsonic-art`, scoped to the server/account.
+Cached images are reused on later syncs and are independent of downloaded audio.
+
+The normal album-art loader resolves these covers for remote library tracks even
+when their audio files do not exist yet. Thumbnail keys include the fetched
+image, so a previous cached absence does not hide newly available artwork.
+Images remain available after local library scans and restarts.
+
+After updating, restart the simulator and run **Sync catalog to music library**
+once to backfill existing catalog artwork. Missing or invalid covers do not fail
+the song catalog import; the completion message reports unavailable covers, and
+another sync retries them. Image responses are limited to 2 MiB and must be
+JPEG or PNG. Sync cancellation preserves the previous catalog; covers fetched
+before cancellation remain reusable in the artwork cache.
+
+The unified-library test covers image decoding before audio exists, shared-cover
+deduplication, missing-image retry, invalidation of negative thumbnails, and
+artwork survival across scans/restarts. The HTTP tests reject an HTTP-200 JSON
+error presented in place of an image.
+
+### Album grouping across restarts
+
+Remote album groups retain their server/account/album identity during local
+library reorganization. Folder-based album joining applies only to local files;
+remote records with identical titles remain separate when their album IDs differ.
+Startup restores group keys from persisted remote metadata and removes orphan
+groups left by older builds. Existing empty duplicate albums are repaired by
+restarting the updated application, without another catalog sync.
+
+The regression test reproduces the old restart failure using the grouped album
+index, then verifies startup repair, populated album lists, local-album
+preservation and distinct same-title remote albums with folder joining enabled.

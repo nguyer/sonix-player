@@ -13,6 +13,33 @@ static bool fail(subsonic_client_t *c, const char *message) {
 	return false;
 }
 
+void subsoniccache_source(const subsonic_client_t *c, char out[33]) {
+	subsonic_identity_t identity = {0};
+	memcpy(identity.magic, "SONIXS1", 8);
+	snprintf(identity.server, sizeof(identity.server), "%s", c->base_url);
+	snprintf(identity.username, sizeof(identity.username), "%s", c->username);
+	md5_hex(&identity, sizeof(identity), out);
+}
+
+bool subsoniccache_path(const subsonic_client_t *c, const subsonic_song_t *song,
+	const char *root, char *path, size_t size) {
+	if (!root || !*root || !song->id[0] || !song->suffix[0]) return false;
+	char suffix[16];
+	snprintf(suffix, sizeof(suffix), "%s", song->suffix);
+	for (char *p = suffix; *p; ++p) {
+		if (!isalnum((unsigned char)*p)) return false;
+		*p = (char)tolower((unsigned char)*p);
+	}
+	subsonic_identity_t identity = {0};
+	memcpy(identity.magic, "SONIXS1", 8);
+	snprintf(identity.server, sizeof(identity.server), "%s", c->base_url);
+	snprintf(identity.username, sizeof(identity.username), "%s", c->username);
+	snprintf(identity.song_id, sizeof(identity.song_id), "%s", song->id);
+	char hash[33];
+	md5_hex(&identity, sizeof(identity), hash);
+	return snprintf(path, size, "%s/.local/subsonic-cache/%s.%s", root, hash, suffix) < (int)size;
+}
+
 bool subsoniccache_identity(const char *path, subsonic_identity_t *identity) {
 	char name[600];
 	if (!path || !strstr(path, "/.local/subsonic-cache/") ||
@@ -93,6 +120,8 @@ bool subsoniccache_fetch(subsonic_client_t *c, const subsonic_song_t *song,
 	bool ok = f != NULL;
 	if (f) {
 		tag(f, "title", song->title); tag(f, "artist", song->artist); tag(f, "album", song->album);
+		tag(f, "album_artist", song->album_artist); tag(f, "genre", song->genre);
+		fprintf(f, "year=%d\ndisc=%d\n", song->year, song->disc > 0 ? song->disc : 1);
 		fprintf(f, "track=%d\n", song->track);
 		if (ferror(f)) ok = false;
 		if (fclose(f) != 0) ok = false;
