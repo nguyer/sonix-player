@@ -3,6 +3,7 @@
 #include "src/system/decode/decode.h"
 #include "src/system/library/cue.h"
 #include "src/system/library/library.h"
+#include "src/system/library/libraryremote.h"
 #include "src/system/library/metadata.h"
 #include "src/system/playback/playlist.h"
 
@@ -1096,7 +1097,9 @@ bool playlists_import(const char *source_path, bool overwrite, playlists_import_
 	// which is only dropped once they are all in. A leftover from an import cut
 	// short is cleared first.
 	char name[201];
-	bool replacing = overwrite && name_is_usable(stem) && library_playlist_exists(stem);
+	// Imported backups are local copies, never replacements of server identity.
+	library_playlist_link_t linked;
+	bool replacing = overwrite && name_is_usable(stem) && library_playlist_exists(stem) && !library_playlist_link(stem,&linked);
 	if (replacing) {
 		snprintf(name, sizeof(name), "%.180s (import)", stem);
 		if (library_playlist_exists(name)) {

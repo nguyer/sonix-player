@@ -16,6 +16,9 @@ failed_sync = False
 errors = []
 missing_art = True
 art_requests = {}
+server_playlists = {"p1": {"id": "p1", "name": "Road", "owner": "user", "ids": ["catalog-0", "catalog-1", "catalog-0"]}}
+playlist_sequence = 0
+playlist_failure = None
 
 
 def png_chunk(kind, data):
@@ -31,11 +34,25 @@ class CatalogServer(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        global failed_sync, missing_art
+        global failed_sync, missing_art, playlist_failure
         if self.path == "/navidrome/test-fail-next-sync":
             failed_sync = True
         elif self.path == "/navidrome/test-recover-art":
             missing_art = False
+        elif self.path == "/navidrome/test-playlist-edit":
+            server_playlists["p1"].update(name="Server renamed", ids=["catalog-2", "catalog-1"])
+        elif self.path == "/navidrome/test-playlist-conflict":
+            server_playlists["p1"]["ids"] = ["catalog-3"]
+        elif self.path == "/navidrome/test-playlist-delete":
+            for key in list(server_playlists):
+                if server_playlists[key]["name"] == "Upload":
+                    del server_playlists[key]
+        elif self.path == "/navidrome/test-playlist-shared":
+            server_playlists["shared"] = {"id": "shared", "name": "Shared", "owner": "someone-else", "ids": ["catalog-0"]}
+        elif self.path == "/navidrome/test-playlist-list-fail":
+            playlist_failure = "list"
+        elif self.path == "/navidrome/test-playlist-upload-lost":
+            playlist_failure = "created"
         else:
             errors.append("unexpected GET")
         self.send_response(200)
@@ -43,10 +60,58 @@ class CatalogServer(BaseHTTPRequestHandler):
         self.wfile.write(b"ok")
 
     def do_POST(self):
+        global playlist_sequence, playlist_failure
         try:
             form = parse_qs(self.rfile.read(int(self.headers["Content-Length"])).decode(), keep_blank_values=True)
             assert form["u"] == ["user"]
             assert form["t"] == [hashlib.md5(("private-password" + form["s"][0]).encode()).hexdigest()]
+            endpoint = self.path.rsplit("/", 1)[-1]
+            if endpoint in ("getPlaylists.view", "getPlaylist.view", "createPlaylist.view", "updatePlaylist.view", "deletePlaylist.view"):
+                def render(p, entries=False):
+                    result = {key: p[key] for key in ("id", "name", "owner")}
+                    result["songCount"] = len(p["ids"])
+                    if entries:
+                        result["entry"] = [{"id": song} for song in p["ids"]]
+                    return result
+                response = {"status": "ok"}
+                if endpoint == "getPlaylists.view":
+                    if playlist_failure == "list":
+                        playlist_failure = None
+                        self.send_error(503)
+                        return
+                    response["playlists"] = {"playlist": [render(p) for p in server_playlists.values()]}
+                elif endpoint == "getPlaylist.view":
+                    response["playlist"] = render(server_playlists[form["id"][0]], True)
+                elif endpoint == "createPlaylist.view":
+                    if "playlistId" in form:
+                        p = server_playlists[form["playlistId"][0]]
+                        assert p["owner"] == "user"
+                    else:
+                        playlist_sequence += 1
+                        key = f"created-{playlist_sequence}"
+                        p = {"id": key, "name": form["name"][0], "owner": "user", "ids": []}
+                        server_playlists[key] = p
+                    p["ids"] = form.get("songId", [])
+                    response["playlist"] = render(p)
+                    if playlist_failure == "created":
+                        playlist_failure = None
+                        self.send_error(503)  # creation happened, but the reply was lost
+                        return
+                elif endpoint == "updatePlaylist.view":
+                    p = server_playlists[form["playlistId"][0]]
+                    assert p["owner"] == "user"
+                    p["name"] = form["name"][0]
+                else:
+                    p = server_playlists[form["id"][0]]
+                    assert p["owner"] == "user"
+                    del server_playlists[p["id"]]
+                payload = json.dumps({"subsonic-response": response}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
             if self.path == "/navidrome/rest/getCoverArt.view":
                 cover_id = form["id"][0]
                 assert cover_id in ("shared-cover", "missing-cover")
@@ -117,6 +182,7 @@ with tempfile.TemporaryDirectory(prefix="sonix-library-test-") as directory:
     subprocess.run(["g++", str(tmp / "test.o"), str(tmp / "main.o"), *objects,
                     *flags, "-lpthread", "-lm", "-ldl", "-lasound",
                     "-Wl,--wrap=device_state_play_queue_index", "-Wl,--wrap=player_refresh_now_playing",
+                    "-Wl,--wrap=subsonicplaylists_sync_pending", "-Wl,--wrap=gui_notify_popup",
                     "-o", str(tmp / "test")],
                    cwd=root, check=True)
     server = ThreadingHTTPServer(("127.0.0.1", 0), CatalogServer)

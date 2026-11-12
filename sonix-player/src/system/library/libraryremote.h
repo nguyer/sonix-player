@@ -16,4 +16,18 @@ bool library_remote_get(const char *path, library_remote_track_t *row);
 int library_remote_count(const char *source);
 // Unique cover IDs for a staged catalog, with album-ID fallback.
 int library_remote_covers(const char *source, int offset, char ids[][128], int capacity);
+
+typedef struct {
+	char source[33], id[128], local_name[201], base_local[201], remote_name[256], hash[33];
+} library_playlist_link_t;
+int library_playlist_links(const char *source, library_playlist_link_t **out);
+bool library_playlist_link(const char *local_name, library_playlist_link_t *out);
+bool library_playlist_link_record(const library_playlist_link_t *link, unsigned revision);
+bool library_playlist_link_drop(const library_playlist_link_t *link, bool drop_local, unsigned revision);
+// Complete ordered IDs; refuses local files or tracks from another account.
+bool library_playlist_remote_ids(const char *source, const char *name, char (**ids)[128], int *count, unsigned *revision);
+bool library_playlist_remote_replace(const library_playlist_link_t *link, const char *old_name,
+	const char (*ids)[128], int count, unsigned revision);
+bool library_playlist_auto_pending(const char *source, int quiet_seconds);
+bool library_playlist_auto_link_pending(const char *source, const char *id);
 #endif

@@ -12,11 +12,19 @@
 #include "src/system/streaming/subsoniccatalog.h"
 #include "src/system/net/http.h"
 #include "src/system/streaming/subsonicart.h"
+#include "src/system/streaming/subsonicplaylistapi.h"
 #include "src/system/library/albumart.h"
+#include "src/system/library/playlists.h"
 #include "src/system/db/sqlite3.h"
 #include "src/gui/streaming/subsonicpage.c"
 
 static int resumed_index = -1;
+static int automatic_sync_calls,background_notices;
+int __real_subsonicplaylists_sync_pending(subsonic_client_t *,const atomic_bool *);
+int __wrap_subsonicplaylists_sync_pending(subsonic_client_t *c,const atomic_bool *cancel) {
+ ++automatic_sync_calls;return __real_subsonicplaylists_sync_pending(c,cancel);
+}
+void __wrap_gui_notify_popup(const char *text) {(void)text;++background_notices;}
 bool __wrap_device_state_play_queue_index(int index) { resumed_index = index; return true; }
 void __wrap_player_refresh_now_playing(void) {}
 
@@ -59,6 +67,181 @@ static void assert_albums_populated(void) {
 		assert(ix && library_index_count(ix) > 0);
 		library_index_close(ix);
 	}
+}
+
+static void control_server(const char *base,const char *action) {
+	char url[640],*body;
+	snprintf(url,sizeof(url),"%s/%s",base,action);
+	assert(http_get(url,&body,NULL,1024,5));free(body);
+}
+
+static void test_playlists(subsonic_client_t *client,const char *root,const char *database) {
+	atomic_bool cancel=false;
+	library_playlist_row_t local={0};
+	snprintf(local.path,sizeof(local.path),"%s/Local.wav",root);strcpy(local.title,"Local track");local.present=true;
+	assert(library_playlist_create("Road"));assert(library_playlist_append("Road",&local));
+	assert(library_playlist_create("Local only"));assert(library_playlist_append("Local only",&local));
+	control_server(client->base_url,"test-playlist-list-fail");
+	assert(subsonicplaylists_sync(client,&cancel)==-1);
+	assert(library_playlist_count("Road")==1 && library_playlist_count("Local only")==1);
+	assert(subsonicplaylists_sync(client,&cancel)==1);
+	char source[33];subsoniccache_source(client,source);
+	library_playlist_link_t *links=NULL,link;
+	assert(library_playlist_links(source,&links)==1);link=links[0];free(links);
+	assert(strcmp(link.local_name,"Road")); // collision never overwrites a local list
+	assert(library_playlist_count("Road")==1 && library_playlist_count("Local only")==1);
+	char (*ids)[128]=NULL;int count;unsigned rev;
+	assert(library_playlist_remote_ids(source,link.local_name,&ids,&count,&rev));
+	assert(count==3 && !strcmp(ids[0],"catalog-0") && !strcmp(ids[1],"catalog-1") && !strcmp(ids[2],"catalog-0"));free(ids);
+	assert(!library_playlist_auto_pending(source,0));
+	assert(library_playlist_move(link.local_name,0,2));
+	assert(library_playlist_auto_pending(source,0));
+	library_close();assert(library_open(database)); // pending offline edits survive restart
+	assert(library_playlist_auto_pending(source,0));
+	assert(subsonicplaylists_sync(client,&cancel)==1);
+	subsonic_playlist_snapshot_t remote;
+	assert(subsonic_playlist_get(client,"p1",&remote));
+	assert(remote.count==3 && !strcmp(remote.ids[0],"catalog-1") && !strcmp(remote.ids[2],"catalog-0"));subsonic_playlist_free(&remote);
+	assert(library_playlist_rename(link.local_name,"Driving"));
+	assert(subsonicplaylists_sync(client,&cancel)==1);
+	assert(subsonic_playlist_get(client,"p1",&remote));assert(!strcmp(remote.info.name,"Driving"));subsonic_playlist_free(&remote);
+	control_server(client->base_url,"test-playlist-edit");
+	assert(subsonicplaylists_sync(client,&cancel)==1);
+	assert(!library_playlist_exists("Driving") && library_playlist_count("Server renamed")==2);
+	library_remote_track_t song;char path[512];subsonic_song_t s={0};strcpy(s.id,"catalog-0");strcpy(s.suffix,"flac");
+	assert(subsoniccache_path(client,&s,root,path,sizeof(path)) && library_remote_get(path,&song));
+	library_playlist_row_t row={0};strcpy(row.path,path);strcpy(row.title,song.song.title);row.present=true;
+	assert(library_playlist_append("Server renamed",&row));
+	control_server(client->base_url,"test-playlist-conflict");
+	assert(subsonicplaylists_sync(client,&cancel)==-1);
+	assert(strstr(client->error,"both here and on the server"));
+	assert(library_playlist_count("Server renamed")==3);
+	assert(subsonic_playlist_get(client,"p1",&remote));assert(remote.count==1 && !strcmp(remote.ids[0],"catalog-3"));subsonic_playlist_free(&remote);
+	int position=2;assert(library_playlist_remove_positions("Server renamed",&position,1)==1);
+	assert(subsonicplaylists_sync(client,&cancel)==1);
+	assert(library_playlist_count("Server renamed")==1);
+	assert(library_playlist_drop("Server renamed"));
+	library_close();assert(library_open(database)); // deletion remains pending across restart
+	assert(subsonicplaylists_sync(client,&cancel)==1); // local deletion reaches server
+	subsonic_playlist_t *lists=NULL;assert(subsonic_playlists(client,&lists)==0);free(lists);
+	assert(library_playlist_create("Upload"));assert(library_playlist_append("Upload",&row));assert(library_playlist_append("Upload",&row));
+	control_server(client->base_url,"test-playlist-upload-lost");
+	assert(!subsonicplaylists_upload(client,"Upload",&cancel));
+	assert(subsonicplaylists_upload(client,"Upload",&cancel));
+	assert(library_playlist_link("Upload",&link));
+	assert(subsonic_playlist_get(client,link.id,&remote));assert(remote.count==2);subsonic_playlist_free(&remote);
+	assert(!subsonicplaylists_upload(client,"Local only",&cancel)); // no ID guessing or partial uploads
+	assert(subsonic_playlists(client,&lists)==1);free(lists);
+	library_close();
+ sqlite3 *upgrade=NULL;sqlite3_stmt *upgrade_row=NULL;
+ assert(sqlite3_open(database,&upgrade)==SQLITE_OK);
+ assert(sqlite3_prepare_v2(upgrade,"SELECT rowid FROM REMOTE_PLAYLISTS WHERE local_name='Upload'",-1,&upgrade_row,NULL)==SQLITE_OK);
+ assert(sqlite3_step(upgrade_row)==SQLITE_ROW);
+ long long upgrade_id=sqlite3_column_int64(upgrade_row,0);sqlite3_finalize(upgrade_row);
+ for(int i=0;i<3;++i) {
+  char sql[128];snprintf(sql,sizeof(sql),"DROP TRIGGER remote_playlist_%lld_%d",upgrade_id,i);
+  assert(sqlite3_exec(upgrade,sql,NULL,NULL,NULL)==SQLITE_OK);
+ }
+ sqlite3_close(upgrade);
+ assert(library_open(database));assert(library_playlist_link("Upload",&link));
+ assert(library_playlist_auto_pending(source,0)); // upgrade reconciles old server links once
+ assert(subsonicplaylists_sync_pending(client,&cancel)==1);
+ assert(!library_playlist_auto_pending(source,0));
+	control_server(client->base_url,"test-playlist-delete");
+	assert(subsonicplaylists_sync(client,&cancel)==0);
+	assert(!library_playlist_exists("Upload"));
+	assert(library_playlist_exists("Local only") && library_playlist_exists("Road"));
+	assert(library_playlist_create("Empty"));
+	assert(subsonicplaylists_upload(client,"Empty",&cancel));
+	assert(library_playlist_link("Empty",&link));
+	assert(subsonic_playlist_get(client,link.id,&remote));assert(remote.count==0);subsonic_playlist_free(&remote);
+	assert(library_playlist_append("Empty",&row));assert(subsonicplaylists_sync(client,&cancel)==1);
+	position=0;assert(library_playlist_remove_positions("Empty",&position,1)==1);
+	assert(subsonicplaylists_sync(client,&cancel)==1);
+	assert(subsonic_playlist_get(client,link.id,&remote));assert(remote.count==0);subsonic_playlist_free(&remote);
+	assert(library_playlist_drop("Empty"));assert(subsonicplaylists_sync(client,&cancel)==1);
+	control_server(client->base_url,"test-playlist-shared");
+	assert(subsonicplaylists_sync(client,&cancel)==1);
+	assert(library_playlist_append("Shared",&row));
+	assert(subsonicplaylists_sync(client,&cancel)==-1);
+	assert(strstr(client->error,"read-only"));
+	assert(subsonic_playlist_get(client,"shared",&remote));assert(remote.count==1);subsonic_playlist_free(&remote);
+	char (*large)[128]=calloc(500,128);assert(large);
+	for(int i=0;i<500;++i)strcpy(large[i],"catalog-0");
+	char large_id[128];
+	assert(subsonic_playlist_put(client,NULL,"API large",(const char (*)[128])large,500,large_id));free(large);
+	assert(subsonic_playlist_get(client,large_id,&remote));assert(remote.count==500);subsonic_playlist_free(&remote);
+	assert(subsonic_playlist_delete(client,large_id));
+	atomic_store(&cancel,true);assert(subsonicplaylists_sync(client,&cancel)==-1);
+}
+
+
+static void test_automatic_playlists(subsonic_client_t *client,const char *root,const char *database) {
+ atomic_bool cancel=false;
+ char source[33];subsoniccache_source(client,source);
+ int position=1;assert(library_playlist_remove_positions("Shared",&position,1)==1);
+ assert(subsonicplaylists_sync(client,&cancel)==1);
+ assert(!library_playlist_auto_pending(source,0));
+ playlists_init(root);
+ char backup[600];snprintf(backup,sizeof(backup),"%s/Shared.m3u",root);
+ FILE *backup_file=fopen(backup,"w");assert(backup_file);
+ fprintf(backup_file,"#EXTM3U\n%s/Local.wav\n",root);fclose(backup_file);
+ playlists_import_result_t imported;
+ assert(playlists_import(backup,true,&imported));
+ assert(strcmp(imported.name,"Shared") && library_playlist_count("Shared")==1);
+ library_playlist_link_t imported_link;
+ assert(!library_playlist_link(imported.name,&imported_link));
+ assert(!library_playlist_auto_pending(source,0));
+ library_playlist_row_t row={0};subsonic_song_t song={0};
+ strcpy(song.id,"catalog-0");strcpy(song.suffix,"flac");
+ assert(subsoniccache_path(client,&song,root,row.path,sizeof(row.path)));row.present=true;
+ assert(library_playlist_create("Automatic"));
+ assert(subsonicplaylists_upload(client,"Automatic",&cancel));
+ library_playlist_link_t link;assert(library_playlist_link("Automatic",&link));
+ assert(!library_playlist_auto_pending(source,0));
+ int calls=automatic_sync_calls;
+ assert(library_playlist_append("Local only",&row));
+ auto_retry_at=0;lv_tick_inc(3000);auto_sync_playlists();
+ assert(!busy && automatic_sync_calls==calls); // no network work for local-only edits
+ assert(library_playlist_append("Automatic",&row));
+ assert(library_playlist_auto_pending(source,0));
+ library_close();assert(library_open(database));
+ assert(library_playlist_auto_pending(source,0)); // persistent queue
+ usleep(2100000);lv_tick_inc(3000);
+ lv_obj_t *screen=lv_screen_active();
+ auto_sync_playlists();assert(busy);pump_request();
+ assert(lv_screen_active()==screen && automatic_sync_calls==calls+1);
+ assert(!library_playlist_auto_pending(source,0));
+ subsonic_playlist_snapshot_t remote;
+ assert(subsonic_playlist_get(client,link.id,&remote));assert(remote.count==1);subsonic_playlist_free(&remote);
+ assert(library_playlist_append("Automatic",&row));
+ control_server(client->base_url,"test-playlist-list-fail");
+ usleep(2100000);lv_tick_inc(3000);auto_retry_at=0;
+ int notices=background_notices;
+ auto_sync_playlists();pump_request();
+ assert(library_playlist_auto_pending(source,0) && background_notices==notices+1);
+ calls=automatic_sync_calls;lv_tick_inc(3000);auto_sync_playlists();
+ assert(!busy && automatic_sync_calls==calls); // backoff, no tight retry loop
+ auto_retry_at=0;lv_tick_inc(3000);auto_sync_playlists();pump_request();
+ assert(!library_playlist_auto_pending(source,0));
+ assert(subsonic_playlist_get(client,link.id,&remote));assert(remote.count==2);subsonic_playlist_free(&remote);
+ // A conflicting/read-only playlist does not block other healthy server lists.
+ assert(library_playlist_append("Shared",&row));assert(library_playlist_append("Automatic",&row));
+ usleep(2100000);lv_tick_inc(3000);auto_retry_at=0;
+ auto_sync_playlists();pump_request();
+ assert(subsonic_playlist_get(client,link.id,&remote));assert(remote.count==3);subsonic_playlist_free(&remote);
+ assert(!library_playlist_auto_link_pending(source,link.id));
+ assert(library_playlist_auto_pending(source,0)); // Shared still needs resolution
+ position=1;assert(library_playlist_remove_positions("Shared",&position,1)==1);
+ assert(subsonicplaylists_sync(client,&cancel)==2);
+ assert(!library_playlist_auto_pending(source,0));
+ assert(library_playlist_drop("Automatic"));assert(library_playlist_auto_pending(source,0));
+ usleep(2100000);lv_tick_inc(3000);auto_retry_at=0;
+ auto_sync_playlists();pump_request();
+ assert(!library_playlist_auto_pending(source,0));
+ assert(!library_playlist_link("Automatic",&link));
+ subsonic_playlist_t *lists=NULL;assert(subsonic_playlists(client,&lists)==1);free(lists);
+ assert(library_playlist_exists("Local only")); // never uploaded or removed
 }
 
 int main(int argc, char **argv) {
@@ -225,6 +408,8 @@ int main(int argc, char **argv) {
 	assert(access(remote.path, F_OK) == 0);
 	assert(prepare_track(remote.path)); // downloaded tracks play offline
 	assert(prepare_track(local)); // local-only tracks never contact Navidrome
+	test_playlists(&client,argv[1],database);
+	test_automatic_playlists(&client,argv[1],database);
 	// Same title, different remote album IDs stay separate even with local
 	// folder joining enabled (all remote audio lives in the same cache folder).
 	library_remote_track_t same_name[2];

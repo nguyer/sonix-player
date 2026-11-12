@@ -53,6 +53,10 @@
 #define FORMAT_APE 9
 
 static const char *const SCHEMA[] = {
+	"CREATE TABLE IF NOT EXISTS REMOTE_PLAYLIST_DIRTY(source TEXT,id TEXT,changed_at INT,PRIMARY KEY(source,id))",
+	"CREATE TABLE IF NOT EXISTS REMOTE_PLAYLISTS(source TEXT,id TEXT,local_name TEXT UNIQUE,base_local TEXT,"
+	"remote_name TEXT,hash TEXT,PRIMARY KEY(source,id))",
+	"CREATE UNIQUE INDEX IF NOT EXISTS remote_playlist_local_ci ON REMOTE_PLAYLISTS(local_name COLLATE NOCASE)",
 	"CREATE TABLE IF NOT EXISTS REMOTE_MEDIA(path TEXT PRIMARY KEY,source TEXT,server TEXT,username TEXT,"
 	"remote_id TEXT,album_id TEXT,title TEXT,artist TEXT,album TEXT,cover_id TEXT,duration INT,track INT,suffix TEXT,"
 	"sortkey TEXT,character TEXT,album_key TEXT,album_artist TEXT,genre TEXT,year INT,disc INT)",
@@ -314,6 +318,8 @@ static const char *const SORT_INDEXES[] = {
 static sqlite3 *db;
 static pthread_mutex_t db_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool remote_restore(void);
+static void playlist_auto_setup_locked(void);
+static void playlist_auto_mark_name_locked(const char *name);
 
 // Bumped whenever a row's identity can have changed underneath a list that is
 // already open.
@@ -1421,6 +1427,7 @@ bool library_open(const char *db_path) {
 
 	pthread_mutex_lock(&db_lock);
 	remote_restore(); // recover remote rows even after an interrupted local scan
+	playlist_auto_setup_locked();
 	links_check();
 	bump_all_generations(); // a different card is a different set of row ids
 	pthread_mutex_unlock(&db_lock);
@@ -1473,6 +1480,7 @@ static bool playlist_table(const char *name, char *out, size_t out_size);
 // left where it was, which no scan can rebuild. The playlists, one table each,
 // are found by name.
 static const char *const KEPT_TABLES[] = {
+	"REMOTE_PLAYLISTS", "REMOTE_PLAYLIST_DIRTY",
 	"FAVOURITES",			"PLAYBACK_STATE",		"PLAYBACK_QUEUE", "PLAYBACK_QUEUE_STATE",
 	"PLAYBACK_QUEUE_QUERY", "PLAYBACK_QUEUE_ALBUM", "PLAYLIST_MIGRATION",   "PLAY_COUNTS",
 	"PLAY_HISTORY",
@@ -7008,7 +7016,7 @@ static bool playlist_table_exists_locked(const char *name) {
 	snprintf(table, sizeof(table), LIBRARY_PLAYLIST_PREFIX "%s", name);
 	sqlite3_stmt *stmt = NULL;
 	bool found = false;
-	if (sqlite3_prepare_v2(db, "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", -1, &stmt, NULL) ==
+	if (sqlite3_prepare_v2(db, "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? COLLATE NOCASE", -1, &stmt, NULL) ==
 		SQLITE_OK) {
 		sqlite3_bind_text(stmt, 1, table, -1, SQLITE_TRANSIENT);
 		found = sqlite3_step(stmt) == SQLITE_ROW;
@@ -7113,6 +7121,7 @@ bool library_playlist_drop(const char *name) {
 		char sql[PLAYLIST_TABLE_MAX + 32];
 		snprintf(sql, sizeof(sql), "DROP TABLE %s", quoted);
 		ok = exec(sql);
+		if(ok) playlist_auto_mark_name_locked(name);
 	}
 	if (ok) {
 		bump_generation(GEN_PLAYLISTS);
@@ -7131,10 +7140,30 @@ bool library_playlist_rename(const char *name, const char *new_name) {
 	}
 	pthread_mutex_lock(&db_lock);
 	bool ok = false;
-	if (db && playlist_table_exists_locked(name) && !playlist_table_exists_locked(new_name)) {
+	bool reserved = false;
+	sqlite3_stmt *reserved_stmt = NULL;
+	if(db && sqlite3_prepare_v2(db,"SELECT 1 FROM REMOTE_PLAYLISTS WHERE local_name=? COLLATE NOCASE "
+		"AND local_name<>? COLLATE NOCASE",-1,&reserved_stmt,NULL)==SQLITE_OK) {
+		sqlite3_bind_text(reserved_stmt,1,new_name,-1,SQLITE_TRANSIENT);sqlite3_bind_text(reserved_stmt,2,name,-1,SQLITE_TRANSIENT);
+		reserved=sqlite3_step(reserved_stmt)==SQLITE_ROW;sqlite3_finalize(reserved_stmt);
+	}
+	if (db && !reserved && playlist_table_exists_locked(name) && !playlist_table_exists_locked(new_name)) {
+		bool transaction=exec("SAVEPOINT playlist_rename");
 		char sql[2 * PLAYLIST_TABLE_MAX + 32];
 		snprintf(sql, sizeof(sql), "ALTER TABLE %s RENAME TO %s", from, to);
-		ok = exec(sql);
+		ok = transaction && exec(sql);
+		if (ok) {
+			sqlite3_stmt *link = NULL;
+			if (sqlite3_prepare_v2(db,"UPDATE REMOTE_PLAYLISTS SET local_name=? WHERE local_name=?",-1,&link,NULL)==SQLITE_OK) {
+				sqlite3_bind_text(link,1,new_name,-1,SQLITE_TRANSIENT); sqlite3_bind_text(link,2,name,-1,SQLITE_TRANSIENT);
+				ok=sqlite3_step(link)==SQLITE_DONE; sqlite3_finalize(link);
+				if(ok)playlist_auto_mark_name_locked(new_name);
+			} else ok=false;
+		}
+		if(transaction) {
+			if(!ok)exec("ROLLBACK TO playlist_rename");
+			bool released=exec("RELEASE playlist_rename");ok=ok && released;
+		}
 	}
 	if (ok) {
 		bump_generation(GEN_PLAYLISTS);
@@ -7161,6 +7190,8 @@ static bool playlist_append_locked(const char *quoted, const library_playlist_ro
 	sqlite3_finalize(stmt);
 	return ok;
 }
+
+#include "libraryremoteplaylists.inc"
 
 bool library_playlist_append(const char *name, const library_playlist_row_t *row) {
 	char quoted[PLAYLIST_TABLE_MAX];

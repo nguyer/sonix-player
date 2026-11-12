@@ -96,14 +96,20 @@ static bool auth_form(subsonic_client_t *c, const char *params, char *form, size
 	return true;
 }
 
-static bool call(subsonic_client_t *c, const char *method, const char *params,
+bool subsonic_api_call(subsonic_client_t *c, const char *method, const char *params,
 				 char **body, json_doc_t *doc, int *response) {
-	char form[4096], url[640];
-	if (!auth_form(c, params, form, sizeof(form))) return false;
+	char url[640];
+	size_t form_size = strlen(params) + 1400;
+	if (form_size > 2 * 1024 * 1024) return fail(c, "Request is too long.");
+	char *form = malloc(form_size);
+	if (!form) return fail(c, "Not enough memory for the request.");
+	if (!auth_form(c, params, form, form_size)) { free(form); return false; }
 	snprintf(url, sizeof(url), "%s/rest/%s.view", c->base_url, method);
 	http_req_t req = {.method = "POST", .body = form, .want_error_body = true};
 	int status = 0;
-	if (!http_request(url, &req, body, NULL, 2 * 1024 * 1024, 15, &status))
+	bool requested = http_request(url, &req, body, NULL, 2 * 1024 * 1024, 15, &status);
+	free(form);
+	if (!requested)
 		return fail(c, "Cannot reach the Subsonic server. Check the address and connection.");
 	if (!json_parse(*body, doc)) {
 		free(*body);
@@ -127,7 +133,7 @@ bool subsonic_ping(subsonic_client_t *c) {
 	char *body;
 	json_doc_t doc;
 	int response;
-	if (!call(c, "ping", "", &body, &doc, &response)) return false;
+	if (!subsonic_api_call(c, "ping", "", &body, &doc, &response)) return false;
 	json_free(&doc);
 	free(body);
 	return true;
@@ -169,7 +175,7 @@ int subsonic_search_songs(subsonic_client_t *c, const char *query, int offset,
 	char *body;
 	json_doc_t doc;
 	int response;
-	if (!call(c, "search3", params, &body, &doc, &response)) return -1;
+	if (!subsonic_api_call(c, "search3", params, &body, &doc, &response)) return -1;
 	int result = json_get(&doc, response, "searchResult3");
 	int array = json_get(&doc, result, "song");
 	int count = json_len(&doc, array);

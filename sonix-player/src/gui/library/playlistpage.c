@@ -27,6 +27,8 @@
 #include "src/system/streaming/qobuzsync.h"
 #include "src/system/streaming/tidalcache.h"
 #include "src/system/streaming/tidalsync.h"
+#include "src/gui/streaming/subsonicpage.h"
+#include "src/system/library/libraryremote.h"
 
 lv_obj_t *playlistpage_screen;
 
@@ -362,6 +364,8 @@ static void menu_delete_action(void *user) {
 	}
 	char message[PLAYLIST_NAME_MAX + 64];
 	snprintf(message, sizeof(message), tr("playlist_will_be_removed_its_backup_stays"), menu_name);
+	library_playlist_link_t link;
+	if(library_playlist_link(menu_name,&link)) snprintf(message,sizeof(message),"This is a Navidrome playlist. Deleting it also queues deletion of its server copy.");
 	confirm_show("delete_the_playlist", message, "delete", do_delete, NULL);
 }
 
@@ -393,6 +397,11 @@ static void menu_backup_action(void *user) {
 	menu_name[0] = '\0';
 }
 
+static void menu_navidrome_action(void *user) {
+	(void)user;
+	if(menu_name[0])subsonicpage_sync_playlists(menu_name);
+}
+
 static void menu_btn_cb(lv_event_t *e) {
 	lv_event_stop_bubbling(e);
 	if (player_sheet_drag_active() || switcher_back_drag_active()) {
@@ -405,12 +414,15 @@ static void menu_btn_cb(lv_event_t *e) {
 	}
 	snprintf(menu_name, sizeof(menu_name), "%s", name);
 
-	popover_item_t items[3] = {
+	library_playlist_link_t link;
+	bool linked=library_playlist_link(menu_name,&link);
+	popover_item_t items[4] = {
 		{"rename", menu_rename_action, NULL},
 		{"delete", menu_delete_action, NULL},
 		{"playlist_backup", menu_backup_action, NULL},
+		{linked?"Sync with Navidrome":"Upload to Navidrome",menu_navidrome_action,NULL},
 	};
-	popover_show(lv_event_get_current_target(e), items, 3);
+	popover_show(lv_event_get_current_target(e), items, 4);
 }
 
 // ---------------------------------------------------------------------------
@@ -591,8 +603,18 @@ static void tidal_playlists_ready_async(void *user) {
 
 static void tidal_playlists_changed(void) { gui_post(tidal_playlists_ready_async, NULL); }
 
+static bool collecting_server_playlists;
+static bool playlist_section_started;
+
 static bool collect_row_cb(const char *name, void *user) {
 	int *count = user;
+	library_playlist_link_t link;
+	bool server_playlist=library_playlist_link(name,&link);
+	if(server_playlist!=collecting_server_playlists)return true;
+	if(!playlist_section_started) {
+		settingsrow_heading(list,server_playlist?"Navidrome playlists":"Local playlists");
+		playlist_section_started=true;
+	}
 
 	char subtitle[48];
 	int tracks = playlists_count_tracks(name);
@@ -1273,6 +1295,9 @@ static void rebuild_rows(void) {
 			tidalsync_playlists_refresh(tidal_playlists_changed);
 		}
 	} else {
+		collecting_server_playlists=false;playlist_section_started=false;
+		playlists_for_each(collect_row_cb, &count);
+		collecting_server_playlists=true;playlist_section_started=false;
 		playlists_for_each(collect_row_cb, &count);
 	}
 

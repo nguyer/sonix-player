@@ -210,3 +210,93 @@ restarting the updated application, without another catalog sync.
 The regression test reproduces the old restart failure using the grouped album
 index, then verifies startup repair, populated album lists, local-album
 preservation and distinct same-title remote albums with folder joining enabled.
+
+## Sixth milestone: playlist synchronization
+
+Restart the rebuilt simulator, then choose **Streaming > Navidrome > Sync
+playlists with server**. Server playlists appear in the normal Music playlist
+list. Sync the song catalog first so every playlist entry can be associated
+with its server-scoped song identity. Playlist audio uses the same on-demand
+download preparation as album and track queues.
+
+Existing local playlists stay local. To upload one explicitly, open its ellipsis
+menu in Music > Playlists and choose **Upload to Navidrome**. All entries must
+have Navidrome IDs from the connected account; a playlist containing local-only
+files or another account's tracks is rejected before anything is sent. No song
+matching or partial upload is performed. Successfully uploaded playlists become
+linked to their server IDs. Their menu then offers **Sync with Navidrome**.
+
+Server refresh remains available through the sync actions. Device edits to linked
+playlists now synchronize automatically as described below. Ordered entries
+(including duplicates), renames and deletions synchronize
+in both directions. A local deletion of an owned linked playlist removes the
+server copy on the next successful sync if the server version has not changed.
+Deleting a server playlist removes its unchanged local mirror on sync. Local
+playlist edits, pending deletions and account/playlist mappings survive restarts.
+
+Names are not identities: remote IDs are stored separately. A server playlist
+whose name collides with a local playlist receives a distinct local display
+name, without overwriting the local playlist or changing the server's name.
+Read-only shared playlists can be imported; attempts to send local changes to
+them are refused and the local edits remain available.
+
+Each link records the last synchronized title and ordered-ID fingerprint. If
+both sides changed differently, sync stops with a conflict message and preserves
+both versions. Resolve by making the contents/titles agree, or restoring one
+side to its last synchronized version, then sync again. The Subsonic API does
+not provide conditional versioned playlist writes: conflict checks compare
+snapshots taken during sync, not a server-side atomic compare-and-swap.
+
+Local playlist replacement and mapping updates are atomic. Local revision
+checks reject updates if playlists changed during the request. Network errors
+do not advance the baseline. If creation succeeded but its reply was lost, a
+retry adopts an identical owned server playlist rather than creating another;
+ambiguous multiple matches require manual inspection. Sync is atomic per local
+playlist, not for the entire account: already completed playlists stay synced
+when a later conflict, network failure or cancellation stops the run. A remote
+content update and rename are separate API requests; a partial success may
+require aligning the two versions and retrying.
+
+Requests and responses remain bounded (2 MiB each; at most 1,000 server playlist
+headers / 10,000 entries in one snapshot). Oversized or malformed data fails
+instead of silently dropping entries. These limits can reject a large playlist
+before the nominal entry maximum if its full server response is too large.
+
+The loopback integration suite verifies pulls and pushes, order/duplicates,
+renames in both directions, two-sided conflicts, deletions, empty playlists,
+explicit uploads, local-name collision protection, invalid local tracks,
+read-only shared playlists, persisted offline edits/deletions, network failures,
+recovery after a lost create reply, and uploads larger than the old 4 KiB form
+buffer. Live-server playlist editing and target-device testing remain to be done.
+
+## Seventh milestone: automatic server-origin playlist edits
+
+The built-in playlist page separates **Local playlists** and **Navidrome
+playlists**. Origin is the persisted server/account/playlist link, not a name
+prefix or the tracks a playlist happens to contain. Creating or modifying a
+local playlist never makes it a server playlist. Explicit **Upload to
+Navidrome** remains the opt-in way to link a local playlist.
+
+Edits to linked playlists (contents, ordering, renames and deletions) queue
+automatic background synchronization. A short quiet period coalesces edit
+bursts. Pending work lives in SQLite and survives restart; the saved matching
+account is used when available. Failure retries back off for about 30 seconds.
+Disconnecting suspends automatic work until that account is connected again.
+
+Only linked playlist tables receive edit triggers. Server imports and successful
+syncs clear their own pending markers, preventing feedback loops. Background
+passes process pending linked playlists only: they neither upload local lists
+nor import every newly created server playlist. Use **Sync playlists with
+server** to refresh server-origin additions and changes when there are no local
+edits. Existing links from older builds are reconciled once during upgrade.
+
+Background work does not navigate away from the current screen. Conflicting or
+read-only edits remain queued and reported; healthy pending playlists can still
+sync. Identical repeated errors do not repeatedly display notifications. Local
+playlist backups imported under a server playlist's name become separate local
+copies, avoiding accidental replacement or deletion of server identity.
+
+Tests cover zero automatic-sync calls for local-only edits, background uploads
+without navigation changes, persistent queued edits, failure/retry behavior,
+healthy playlists progressing beside a read-only conflict, automatic deletion,
+upgrade of existing links, and backup-import origin isolation.
