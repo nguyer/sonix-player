@@ -59,6 +59,7 @@ static const char *music_storage_root(void) {
 #endif
 }
 static bool connected, busy;
+static bool login_pending;
 static bool busy_play;
 static bool busy_sync, saved_connection;
 static char waiting_path[512];
@@ -91,6 +92,7 @@ static pthread_mutex_t result_lock = PTHREAD_MUTEX_INITIALIZER;
 static request_t *completed;
 
 static void rebuild_home(void);
+static void maybe_connect(void);
 static void request_ready(void *unused);
 static void availability_event(void *unused);
 static void offline_event(void *unused);
@@ -199,7 +201,7 @@ static void consume_result(void) {
   if(r->count>=0) {
    subsonic_forget_server(account.base_url,account.username);
    subsonic_client_clear(&account);connected=saved_connection=false;
-   server[0]=username[0]=password[0]=waiting_path[0]=0;
+   server[0]=username[0]=waiting_path[0]=0;clear_password();login_pending=false;
    config_set("subsonic","server","");config_set("subsonic","username","");config_save();
    snprintf(message,sizeof(message),"Connection and its music, artwork and playlists removed.");
    player_refresh_now_playing();subsonicpage_downloads_changed();
@@ -219,7 +221,7 @@ static void consume_result(void) {
  }
 	if (r->count < 0) {
 		snprintf(message, sizeof(message), "%s", subsonic_last_error(&r->client));
-		if (r->login) { connected = false; clear_password(); }
+		if (r->login) { connected = false; }
 		if (r->resume_queue || !r->background) gui_notify_popup(message);
 		if(r->background){if(r->prune)cleanup_retry_at=time(NULL)+60;else if(r->sync)offline_retry_at=time(NULL)+60;else auto_retry_at=time(NULL)+30;}
 		if(r->background && strcmp(auto_last_error,message)) {
@@ -229,7 +231,9 @@ static void consume_result(void) {
 		subsonic_client_clear(&account);
 		account = r->client;
 		connected = true;
-		clear_password();
+        snprintf(server,sizeof(server),"%s",account.base_url);
+        snprintf(username,sizeof(username),"%s",account.username);
+        clear_password();snprintf(password,sizeof(password),"%s",account.password);
 		config_set("subsonic", "server", server);
 		config_set("subsonic", "username", username);
 		config_save();
@@ -277,13 +281,14 @@ static void consume_result(void) {
 	// away from the screen they chose in the meantime.
 }
 
-static void request_ready(void *unused){(void)unused;consume_result();if(!busy)prepare_waiting();}
+static void request_ready(void *unused){(void)unused;consume_result();maybe_connect();if(!busy)prepare_waiting();}
 static void availability_event(void *unused){
  (void)unused;medialist_notify_availability();
 }
 static void offline_event(void *unused){
  (void)unused;
  subsonicpage_downloads_changed();rebuild_home();subsonicofflinepage_notify();
+ maybe_connect();
  if(!busy)prepare_waiting();
 }
 static void start_pending_cleanup(void){
@@ -395,6 +400,7 @@ static void offline_and_probe_tick(void){
  char source[33];subsoniccache_source(&account,source);
  offline_options_t options;time_t now=time(NULL);
  if(library_offline_options(source,&options) && options.automatic &&
+  (!options.charging_only || read_battery_charging()) &&
   subsonic_server_available(account.base_url,account.username) &&
   now>=offline_retry_at && (!options.last_run || now-options.last_run>=options.interval_minutes*60) && gui_card_available()){
   const char *root=music_storage_root();
@@ -409,7 +415,8 @@ static void offline_and_probe_tick(void){
   r->client=account;r->probe=true;r->background=true;probe_at=now+30;submit_request(r);
  }
 }
-static void offline_open_cb(lv_event_t *e){(void)e;subsonicofflinepage_open();}
+static bool connection_ready(void);
+static void offline_open_cb(lv_event_t *e){(void)e;if(connection_ready())subsonicofflinepage_open();}
 
 static bool prepare_track(const char *path) {
 	library_remote_track_t remote;
@@ -455,11 +462,19 @@ static void prepare_waiting(void) {
 	submit_request(r);
 }
 
-static void connect_cb(lv_event_t *e) { (void)e; if (!ignore_tap()) start_request(true); }
+static bool connection_ready(void) {
+ return account.password[0] && !strcmp(server,account.base_url) &&
+  !strcmp(username,account.username) && !strcmp(password,account.password);
+}
+static void maybe_connect(void) {
+ if(!login_pending || busy || subsonicoffline_busy())return;
+ login_pending=false;
+ if(server[0] && username[0] && password[0])start_request(true);
+}
 
 static void sync_cb(lv_event_t *e) {
 	(void)e;
-	if (!ignore_tap()) start_request(false);
+	if (!ignore_tap() && connection_ready()) start_request(false);
 }
 
 bool subsonicpage_sync_playlists(const char *name) {
@@ -577,6 +592,7 @@ static void remove_all_confirmed(void *unused){
  char source[33];subsoniccache_source(&account,source);
  const char *root=music_storage_root();
  if(!account.password[0] || !root || !library_offline_clear(source)){gui_notify_popup("Cannot remove downloads while the library is busy.");return;}
+ subsonicofflinepage_refresh();
  device_state_t state;device_state_get(&state);
  library_remote_track_t track;
  if(active_remote(state.current_file,&track))device_state_stop();
@@ -586,8 +602,8 @@ static void remove_all_confirmed(void *unused){
 bool subsonicpage_remove_all_downloads(void){
  if(busy || subsonicoffline_busy()){gui_notify_popup("Wait for the current Navidrome operation to finish.");return false;}
  confirm_show("Remove all downloads?",
-  "Remove all downloaded Navidrome music for this connection and reset to Selective mode with automatic caching off? Local music, library entries and playlists are kept. Playback of a downloaded server track will stop.",
-  "Remove downloads",remove_all_confirmed,NULL);
+  "Remove all downloaded Navidrome music for this connection and reset to Selective mode? Local music and playlists will be kept.",
+  "Remove all",remove_all_confirmed,NULL);
  return true;
 }
 
@@ -608,13 +624,17 @@ static void action_button(lv_obj_t *parent,const char *text,bool danger,lv_event
 static void edit_accept(lv_event_t *e) {
 	(void)e;
 	const char *text = lv_textarea_get_text(field);
-	if (editing == 0) snprintf(server, sizeof(server), "%s", text);
-	else if (editing == 1) snprintf(username, sizeof(username), "%s", text);
-	else if (editing == 2) snprintf(password, sizeof(password), "%s", text);
+    char *value=editing==0 ? server : editing==1 ? username : password;
+    size_t size=editing==0 ? sizeof(server) : editing==1 ? sizeof(username) : sizeof(password);
+    bool changed=strcmp(value,text)!=0;
+    if(editing==2)clear_password();
+    snprintf(value,size,"%s",text);
+    if(changed)login_pending=server[0] && username[0] && password[0];
 	lv_textarea_set_text(field, "");
 	keyboard_set_visible(keyboard, false);
-	switch_screen_return_to(subsonic_screen);
-	rebuild_home();
+    switch_screen_return_to(subsonic_screen);
+    rebuild_home();
+    if(changed)maybe_connect();
 }
 
 static void editor_left(lv_event_t *e) {
@@ -654,14 +674,22 @@ static void cancel_cb(lv_event_t *e) {
 static const int refresh_minutes[]={15,30,60,120,360,720,1440};
 static lv_obj_t *refresh_value;
 static void automatic_cb(lv_event_t *e){
- if(switcher_back_drag_active())return;
+ if(switcher_back_drag_active() || !connection_ready())return;
  char source[33];offline_options_t options;subsoniccache_source(&account,source);
  if(!library_offline_options(source,&options))return;
  options.automatic=lv_obj_has_state(lv_event_get_target(e),LV_STATE_CHECKED);
  if(!library_offline_save_options(source,&options))gui_notify_popup("Cannot save sync settings while the library is busy.");
  rebuild_home();
 }
+static void charging_cb(lv_event_t *e){
+ if(switcher_back_drag_active() || !connection_ready())return;
+ char source[33];offline_options_t options;subsoniccache_source(&account,source);
+ if(!library_offline_options(source,&options))return;
+ options.charging_only=lv_obj_has_state(lv_event_get_target(e),LV_STATE_CHECKED);
+ if(!library_offline_save_options(source,&options))gui_notify_popup("Cannot save sync settings while the library is busy.");
+}
 static void refresh_cb(lv_event_t *e){
+ if(!connection_ready())return;
  lv_event_code_t code=lv_event_get_code(e);
  if(code!=LV_EVENT_VALUE_CHANGED && code!=LV_EVENT_RELEASED)return;
  int index=lv_slider_get_value(lv_event_get_target(e));
@@ -672,12 +700,20 @@ static void refresh_cb(lv_event_t *e){
  options.interval_minutes=refresh_minutes[index];
  if(!library_offline_save_options(source,&options))gui_notify_popup("Cannot save sync settings while the library is busy.");
 }
-static void sync_controls(void){
- char source[33];offline_options_t options;subsoniccache_source(&account,source);
- if(!library_offline_options(source,&options))return;
- lv_obj_t *toggle;settingsrow_toggle(home,"Automatic sync",&toggle,automatic_cb);
+static void control_enabled(lv_obj_t *object,bool enabled) {
+ if(enabled)lv_obj_remove_state(object,LV_STATE_DISABLED);else lv_obj_add_state(object,LV_STATE_DISABLED);
+ for(uint32_t i=0;i<lv_obj_get_child_count(object);i++)control_enabled(lv_obj_get_child(object,i),enabled);
+}
+static void sync_controls(bool ready){
+ char source[33];offline_options_t options={.interval_minutes=60};subsoniccache_source(&account,source);
+ if(ready && !library_offline_options(source,&options))options.automatic=0;
+ lv_obj_t *toggle,*row=settingsrow_toggle(home,"Automatic sync",&toggle,automatic_cb);
+ lv_obj_set_style_opa(row,LV_OPA_40,LV_STATE_DISABLED);
+ control_enabled(row,ready);
  if(options.automatic)lv_obj_add_state(toggle,LV_STATE_CHECKED);
  if(options.automatic){
+  lv_obj_t *charging;settingsrow_toggle(home,"Only while charging",&charging,charging_cb);
+  if(options.charging_only)lv_obj_add_state(charging,LV_STATE_CHECKED);
   lv_obj_t *slider;settingsrow_slider(home,"Refresh interval",7,&refresh_value,&slider,NULL);
   int index=0;for(int i=0;i<7;++i)if(abs(refresh_minutes[i]-options.interval_minutes)<abs(refresh_minutes[index]-options.interval_minutes))index=i;
   lv_slider_set_value(slider,index,LV_ANIM_OFF);
@@ -686,28 +722,24 @@ static void sync_controls(void){
  }
 }
 static void build_home(void) {
-
-	lv_obj_clean(home);
-	if(account.password[0]){
-     sync_controls();
-     settingsrow_add(home,"Offline / cache settings",NULL,offline_open_cb,NULL);
-    }
- subsonic_offline_status_t offline_status;subsonicoffline_status(&offline_status);
- bool syncing=busy_sync || busy_play || (offline_status.running && !offline_status.removing);
- if(connected || syncing){
-  action_button(home,syncing?"Cancel sync":"Sync",false,syncing?cancel_cb:sync_cb);
-  if((busy && !syncing) || offline_status.removing)lv_obj_add_state(lv_obj_get_child(home,-1),LV_STATE_DISABLED);
-	} else {
-		lv_obj_t *value;
-		settingsrow_add(home, "Server address", &value, edit_cb, (void *)(intptr_t)0);
-		lv_label_set_text(value, server[0] ? server : "Not set");
-		settingsrow_add(home, "Username", &value, edit_cb, (void *)(intptr_t)1);
-		lv_label_set_text(value, username[0] ? username : "Not set");
-		settingsrow_add(home, "Password", &value, edit_cb, (void *)(intptr_t)2);
-		lv_label_set_text(value, (password[0] || (saved_connection && account.password[0])) ? "••••••••" : "");
-		action_button(home,"Connect",false,connect_cb);
-	}
-
+ lv_obj_clean(home);
+ lv_obj_t *value;
+ settingsrow_add(home,"Server address",&value,edit_cb,(void *)(intptr_t)0);
+ lv_label_set_text(value,server[0] ? server : "Not set");
+ settingsrow_add(home,"Username",&value,edit_cb,(void *)(intptr_t)1);
+ lv_label_set_text(value,username[0] ? username : "Not set");
+ settingsrow_add(home,"Password",&value,edit_cb,(void *)(intptr_t)2);
+ lv_label_set_text(value,password[0] ? "••••••••" : "");
+ bool ready=connection_ready();
+ sync_controls(ready);
+ lv_obj_t *offline=settingsrow_add(home,"Offline / cache settings",NULL,offline_open_cb,NULL);
+ lv_obj_set_style_opa(offline,LV_OPA_40,LV_STATE_DISABLED);control_enabled(offline,ready);
+ subsonic_offline_status_t status;subsonicoffline_status(&status);
+ bool syncing=busy_sync || busy_play || (status.running && !status.removing);
+ action_button(home,syncing ? "Cancel sync" : "Sync",false,syncing ? cancel_cb : sync_cb);
+ lv_obj_t *sync=lv_obj_get_child(home,-1);
+ bool enabled=(ready || syncing) && !(busy && !syncing) && !status.removing;
+ lv_obj_set_style_opa(sync,LV_OPA_40,LV_STATE_DISABLED);control_enabled(sync,enabled);
 }
 
 static void rebuild_home(void){
@@ -740,7 +772,7 @@ void subsonicpage_init(gui_config_t *cfg) {
 	snprintf(username, sizeof(username), "%s", config_get("subsonic", "username", ""));
 	saved_connection = subsonicaccount_load(config_path(), &account);
 	if (saved_connection) {
-		strcpy(server, account.base_url); strcpy(username, account.username);
+		strcpy(server, account.base_url); strcpy(username, account.username);strcpy(password,account.password);
 	}
 	subsonic_screen = lv_obj_create(NULL);
 	home = settingsrow_page(subsonic_screen, cfg, "Navidrome");

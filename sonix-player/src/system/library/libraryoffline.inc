@@ -1,7 +1,7 @@
 // Included in library.c: all state belongs to the card's SQLite database.
 static bool offline_bind_done(sqlite3_stmt *s) { bool ok=s && sqlite3_step(s)==SQLITE_DONE;sqlite3_finalize(s);return ok; }
 bool library_offline_options(const char *source,offline_options_t *o) {
- *o=(offline_options_t){.mode=OFFLINE_SELECTIVE,.auto_cache=1,.interval_minutes=60,.max_bytes=16LL*1024*1024*1024,.reserve_bytes=512LL*1024*1024};
+ *o=(offline_options_t){.mode=OFFLINE_SELECTIVE,.auto_cache=1,.interval_minutes=60,.max_bytes=4LL*1024*1024*1024,.reserve_bytes=512LL*1024*1024};
  pthread_mutex_lock(&db_lock);sqlite3_stmt *s=NULL;
  bool ok=db && sqlite3_prepare_v2(db,"SELECT mode,automatic,charging,cleanup,interval_minutes,max_bytes,reserve_bytes,last_run,auto_cache FROM SUBSONIC_OFFLINE_OPTIONS WHERE source=?",-1,&s,NULL)==SQLITE_OK;
  if(ok){sqlite3_bind_text(s,1,source,-1,SQLITE_TRANSIENT);int rc=sqlite3_step(s);
@@ -120,7 +120,7 @@ bool library_offline_select(const char *source,int kind,const char *value,const 
 }
 bool library_offline_clear(const char *source){
  pthread_mutex_lock(&db_lock);bool transaction=db && !scan_running && exec("BEGIN"),ok=transaction;sqlite3_stmt *s=NULL;
- const char *sql[]={"DELETE FROM SUBSONIC_OFFLINE_RULES WHERE source=?","UPDATE SUBSONIC_OFFLINE_OPTIONS SET mode=1,auto_cache=0 WHERE source=?","UPDATE SUBSONIC_OFFLINE_FILES SET wanted=0 WHERE source=?"};
+ const char *sql[]={"DELETE FROM SUBSONIC_OFFLINE_RULES WHERE source=?","UPDATE SUBSONIC_OFFLINE_OPTIONS SET mode=1 WHERE source=?","UPDATE SUBSONIC_OFFLINE_FILES SET wanted=0 WHERE source=?"};
  for(int i=0;ok && i<3;++i){ok=sqlite3_prepare_v2(db,sql[i],-1,&s,NULL)==SQLITE_OK;
   if(ok){sqlite3_bind_text(s,1,source,-1,SQLITE_TRANSIENT);ok=offline_bind_done(s);s=NULL;}}
  sqlite3_finalize(s);if(ok)ok=exec("COMMIT");if(!ok && transaction)exec("ROLLBACK");

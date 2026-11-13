@@ -19,7 +19,7 @@ static bool account_source(void){if(!client || !client->base_url[0])return false
 static void save(offline_options_t *o){if(!library_offline_save_options(source,o))gui_notify_popup("Cannot save offline settings while the library is busy.");rebuild();}
 
 static lv_obj_t *slider_labels[3];
-static const int storage_values[]={1,4,8,16,32,64,128,256,0};
+static const int storage_values[]={1,2,4,8,16,32,64,128,256,0};
 static const int reserve_values[]={128,256,512,1024,2048,4096,8192};
 static void selection_cb(lv_event_t *e){
  if(switcher_back_drag_active() || !account_source())return;
@@ -33,7 +33,7 @@ static void toggle_cb(lv_event_t *e){
  offline_options_t o;if(!library_offline_options(source,&o))return;
  lv_obj_t *toggle=lv_event_get_target(e);
  bool enabled=lv_obj_has_state(toggle,LV_STATE_CHECKED);
- if((intptr_t)lv_obj_get_user_data(toggle)==0)o.charging_only=enabled;else o.auto_cache=enabled;
+ o.auto_cache=enabled;
  if(!library_offline_save_options(source,&o))gui_notify_popup("Cannot save offline settings while the library is busy.");
 }
 static void slider_text(int which,int value){
@@ -57,7 +57,7 @@ static void slider_cb(lv_event_t *e){
 }
 static void slider_control(const char *name,int which,int64_t value){
  const int *values=which==1?storage_values:reserve_values;
- int count=which==1?9:7,index=0;
+ int count=which==1?(int)(sizeof(storage_values)/sizeof(storage_values[0])):(int)(sizeof(reserve_values)/sizeof(reserve_values[0])),index=0;
  int64_t difference=INT64_MAX;
  for(int i=0;i<count;++i){int64_t d=value-values[i];if(d<0)d=-d;if(d<difference){difference=d;index=i;}}
  lv_obj_t *slider;settingsrow_slider(content,name,count,&slider_labels[which],&slider,NULL);
@@ -81,7 +81,6 @@ static void build_content(void){
  lv_obj_t *pills;settingsrow_pills(content,"Offline mode",&pills);
  for(int i=1;i<3;++i){lv_obj_t *pill=settingsrow_pill_text(pills,modes[i],i,selection_cb);settingsrow_pill_active(pill,o.mode==i);}
  if(o.mode==OFFLINE_SELECTIVE)toggle_control("Automatically cache recently played",o.auto_cache,1);
- toggle_control("Only while charging",o.charging_only,0);
  slider_control("Maximum offline storage",1,o.max_bytes/(1024LL*1024*1024));
  if(!o.max_bytes)slider_control("Reserve free space",2,o.reserve_bytes/(1024LL*1024));
  lv_obj_t *remove=lv_button_create(content);lv_obj_set_size(remove,LV_PCT(100),64);
@@ -110,3 +109,5 @@ void subsonicofflinepage_init(gui_config_t *cfg,subsonic_client_t *account){
  client=account;
  screen=lv_obj_create(NULL);content=settingsrow_page(screen,cfg,"Offline / cache settings");switcher_attach_back_gesture(screen);lv_obj_add_event_cb(screen,loaded,LV_EVENT_SCREEN_LOADED,NULL);
 }
+
+void subsonicofflinepage_refresh(void){if(screen && lv_screen_active()==screen)rebuild();}

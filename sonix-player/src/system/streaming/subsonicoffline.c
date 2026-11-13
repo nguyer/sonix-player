@@ -170,9 +170,8 @@ bool subsonicoffline_start(const subsonic_client_t *client,const char *root,bool
  bool expected=false;if(!atomic_compare_exchange_strong(&running,&expected,true))return false;
  job_t *job=calloc(1,sizeof(*job));if(!job){atomic_store(&running,false);notify_job();return false;}
  job->client=*client;strcpy(job->root,root);subsoniccache_source(client,job->source);job->refresh=refresh;
- if(!library_offline_options(job->source,&job->options) || job->options.mode==OFFLINE_OFF ||
-  (job->options.charging_only && !read_battery_charging())){
-  message("Offline sync is off or waiting for charging.");subsonic_client_clear(&job->client);free(job);atomic_store(&running,false);notify_job();return false;
+ if(!library_offline_options(job->source,&job->options) || job->options.mode==OFFLINE_OFF){
+  message("Offline sync is off.");subsonic_client_clear(&job->client);free(job);atomic_store(&running,false);notify_job();return false;
  }
  atomic_store(&cancelled,false);atomic_store(&interrupted,false);atomic_store(&yielding,false);
  pthread_mutex_lock(&status_lock);memset(&status,0,sizeof(status));strcpy(status.message,"Starting offline sync...");strcpy(status.source,job->source);pthread_mutex_unlock(&status_lock);

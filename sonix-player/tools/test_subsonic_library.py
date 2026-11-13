@@ -209,7 +209,7 @@ with tempfile.TemporaryDirectory(prefix="sonix-library-test-") as directory:
         ["pkg-config", "--libs", "sdl2", "freetype2", "opusfile", "wavpack"], text=True))
     subprocess.run(["g++", str(tmp / "test.o"), str(tmp / "main.o"), *objects,
                     *flags, "-lpthread", "-lm", "-ldl", "-lasound",
-                    "-Wl,--wrap=device_state_play_queue_index", "-Wl,--wrap=device_state_get", "-Wl,--wrap=library_index_open", "-Wl,--wrap=subsoniccache_fetch_offline", "-Wl,--wrap=library_offline_note", "-Wl,--wrap=library_offline_bytes", "-Wl,--wrap=audio_get_status", "-Wl,--wrap=audio_get_current_file", "-Wl,--wrap=player_refresh_now_playing",
+                    "-Wl,--wrap=read_battery_charging", "-Wl,--wrap=device_state_play_queue_index", "-Wl,--wrap=device_state_get", "-Wl,--wrap=library_index_open", "-Wl,--wrap=subsoniccache_fetch_offline", "-Wl,--wrap=library_offline_note", "-Wl,--wrap=library_offline_bytes", "-Wl,--wrap=audio_get_status", "-Wl,--wrap=audio_get_current_file", "-Wl,--wrap=player_refresh_now_playing",
                     "-Wl,--wrap=subsonicplaylists_sync_pending", "-Wl,--wrap=gui_notify_popup",
                     "-o", str(tmp / "test")],
                    cwd=root, check=True)

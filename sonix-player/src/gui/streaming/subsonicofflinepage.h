@@ -5,4 +5,5 @@
 void subsonicofflinepage_init(gui_config_t *cfg,subsonic_client_t *account);
 void subsonicofflinepage_open(void);
 void subsonicofflinepage_notify(void);
+void subsonicofflinepage_refresh(void);
 #endif

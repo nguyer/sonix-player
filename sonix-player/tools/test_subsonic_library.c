@@ -301,9 +301,11 @@ static void test_automatic_playlists(subsonic_client_t *client,const char *root,
 
 
 static void test_offline(subsonic_client_t *client,const char *root,const char *local) {
+ offline_options_t defaults;assert(library_offline_options("unused-default-source",&defaults));
+ assert(defaults.max_bytes==4LL*1024*1024*1024);
  char source[33];subsoniccache_source(client,source);
  offline_options_t opt;assert(library_offline_options(source,&opt));
- opt.mode=OFFLINE_SELECTIVE;opt.reserve_bytes=0;opt.max_bytes=4096;
+ opt.mode=OFFLINE_SELECTIVE;opt.reserve_bytes=0;opt.max_bytes=4096;opt.charging_only=1;
  assert(library_offline_save_options(source,&opt));
  assert(library_offline_rule(source,OFFLINE_SONG,"catalog-7",true));
  assert(library_offline_plan(source,false,NULL,0));
@@ -368,6 +370,8 @@ static lv_obj_t *find_class(lv_obj_t *object,const lv_obj_class_t *type){
  for(uint32_t i=0;i<lv_obj_get_child_count(object);++i){lv_obj_t *found=find_class(lv_obj_get_child(object,i),type);if(found)return found;}
  return NULL;
 }
+static bool test_charging;
+bool __wrap_read_battery_charging(void){return test_charging;}
 static int count_class(lv_obj_t *object,const lv_obj_class_t *type) {
  int n=lv_obj_check_type(object,type)?1:0;
  for(uint32_t i=0;i<lv_obj_get_child_count(object);++i)n+=count_class(lv_obj_get_child(object,i),type);
@@ -375,7 +379,29 @@ static int count_class(lv_obj_t *object,const lv_obj_class_t *type) {
 }
 static void test_navidrome_controls(subsonic_client_t *client,gui_config_t *cfg) {
  control_server(client->base_url,"test-recover-sync");
- assert(subsonic_ping(client));connected=true;rebuild_home();
+ assert(subsonic_ping(client));
+ if(busy)pump_request();
+ subsonic_client_clear(&account);connected=saved_connection=false;
+ server[0]=username[0]=0;clear_password();rebuild_home();
+ assert(find_label(home,"Server address") && find_label(home,"Username") && find_label(home,"Password"));
+ assert(!find_label(home,"Connect"));
+ lv_obj_t *disabled=find_label(home,"Automatic sync");assert(disabled);
+ assert(lv_obj_has_state(lv_obj_get_parent(disabled),LV_STATE_DISABLED));
+ disabled=find_label(home,"Offline / cache settings");assert(disabled && lv_obj_has_state(lv_obj_get_parent(disabled),LV_STATE_DISABLED));
+ disabled=find_label(home,"Sync");assert(disabled && lv_obj_has_state(lv_obj_get_parent(disabled),LV_STATE_DISABLED));
+ // Only a changed, complete set of credentials starts a request.
+ editing=0;lv_textarea_set_text(field,client->base_url);edit_accept(NULL);assert(!busy);
+ editing=1;lv_textarea_set_text(field,client->username);edit_accept(NULL);assert(!busy);
+ editing=2;lv_textarea_set_text(field,"wrong-password");edit_accept(NULL);assert(busy);pump_request();
+ assert(!connected && !connection_ready() && !strcmp(password,"wrong-password"));
+ assert(find_label(home,"Server address") && find_label(home,"••••••••") && !find_label(home,"Connect"));
+ disabled=find_label(home,"Sync");assert(lv_obj_has_state(lv_obj_get_parent(disabled),LV_STATE_DISABLED));
+ editing=2;lv_textarea_set_text(field,client->password);edit_accept(NULL);assert(busy);pump_request();
+ assert(connected && connection_ready() && saved_connection);
+ editing=2;lv_textarea_set_text(field,client->password);edit_accept(NULL);assert(!busy); // unchanged
+ connected=false;rebuild_home(); // established connection stays configurable offline
+ disabled=find_label(home,"Sync");assert(!lv_obj_has_state(lv_obj_get_parent(disabled),LV_STATE_DISABLED));
+ connected=true;rebuild_home();
  assert(!find_label(home,"Search songs") && !find_label(home,"Disconnect"));
  lv_obj_t *label=find_label(home,"Sync");assert(label && lv_obj_check_type(lv_obj_get_parent(label),&lv_button_class));
  assert(!find_label(home,"Remove connection"));
@@ -386,12 +412,12 @@ static void test_navidrome_controls(subsonic_client_t *client,gui_config_t *cfg)
  lv_obj_t *row=lv_obj_get_parent(label);assert(find_label(row,""));
  strcpy(password,"test-password");rebuild_home();
  assert(find_label(home,"••••••••") && !find_label(home,"test-password"));
- clear_password();saved_connection=saved;connected=true;rebuild_home();
+ snprintf(password,sizeof(password),"%s",account.password);saved_connection=saved;connected=true;rebuild_home();
  char source[33];subsoniccache_source(client,source);
  offline_options_t opt;assert(library_offline_options(source,&opt));
  opt.mode=OFFLINE_SELECTIVE;opt.automatic=0;opt.charging_only=0;opt.max_bytes=4096;opt.reserve_bytes=0;
  assert(library_offline_save_options(source,&opt));
- rebuild_home();assert(find_label(home,"Automatic sync") && !find_label(home,"Refresh interval"));
+ rebuild_home();assert(find_label(home,"Automatic sync") && !find_label(home,"Refresh interval") && !find_label(home,"Only while charging"));
  assert(count_class(home,&lv_switch_class)==1);
  int home_height=lv_obj_get_height(home);lv_obj_set_height(home,180);lv_obj_update_layout(home);
  lv_obj_scroll_to_y(home,60,LV_ANIM_OFF);int home_y=lv_obj_get_scroll_y(home);assert(home_y>0);
@@ -402,24 +428,33 @@ static void test_navidrome_controls(subsonic_client_t *client,gui_config_t *cfg)
  assert(toggle);lv_obj_add_state(toggle,LV_STATE_CHECKED);lv_obj_send_event(toggle,LV_EVENT_VALUE_CHANGED,NULL);
  assert(find_label(home,"Refresh interval") && lv_obj_get_scroll_y(home)==home_y);
  assert(library_offline_options(source,&opt) && opt.automatic);
+ label=find_label(home,"Only while charging");assert(label);
+ lv_obj_t *charging=find_class(lv_obj_get_parent(label),&lv_switch_class);assert(charging);
+ lv_obj_add_state(charging,LV_STATE_CHECKED);lv_obj_send_event(charging,LV_EVENT_VALUE_CHANGED,NULL);
+ assert(library_offline_options(source,&opt) && opt.charging_only);
+ assert(lv_obj_get_index(lv_obj_get_parent(label))==lv_obj_get_index(lv_obj_get_parent(find_label(home,"Automatic sync")))+1);
  opt.automatic=0;assert(library_offline_save_options(source,&opt));rebuild_home();
- assert(!find_label(home,"Refresh interval"));
+ assert(!find_label(home,"Refresh interval") && !find_label(home,"Only while charging"));
  lv_obj_set_height(home,home_height);
  subsonicofflinepage_open();
  lv_obj_t *offline=lv_screen_active();
- assert(count_class(offline,&lv_slider_class)==1 && count_class(offline,&lv_switch_class)==2);
+ assert(count_class(offline,&lv_slider_class)==1 && count_class(offline,&lv_switch_class)==1);
  assert(find_label(offline,"Automatically cache recently played") && !find_label(offline,"Off") && !find_label(offline,"Reserve free space"));
  assert(!find_label(offline,"Choose how music should be kept offline.") && !find_label(offline,"Remove downloads no longer selected"));
  assert(find_label(offline,"Offline / cache settings"));
  label=find_label(offline,"Maximum offline storage");assert(label);
  lv_obj_t *storage=find_class(lv_obj_get_parent(label),&lv_slider_class);assert(storage);
- lv_slider_set_value(storage,8,LV_ANIM_OFF);lv_obj_send_event(storage,LV_EVENT_RELEASED,NULL);
+ lv_slider_set_value(storage,1,LV_ANIM_OFF);lv_obj_send_event(storage,LV_EVENT_RELEASED,NULL);
+ assert(library_offline_options(source,&opt) && opt.max_bytes==2LL*1024*1024*1024);
+ assert(find_label(offline,"2 GiB"));
+ label=find_label(offline,"Maximum offline storage");storage=find_class(lv_obj_get_parent(label),&lv_slider_class);assert(storage);
+ lv_slider_set_value(storage,9,LV_ANIM_OFF);lv_obj_send_event(storage,LV_EVENT_RELEASED,NULL);
  assert(find_label(offline,"Reserve free space") && count_class(offline,&lv_slider_class)==2);
  label=find_label(offline,"Maximum offline storage");storage=find_class(lv_obj_get_parent(label),&lv_slider_class);assert(storage);
  lv_slider_set_value(storage,3,LV_ANIM_OFF);lv_obj_send_event(storage,LV_EVENT_RELEASED,NULL);
  assert(!find_label(offline,"Reserve free space") && count_class(offline,&lv_slider_class)==1);
 
- assert(!find_label(offline,"Automatic sync") && !find_label(offline,"Refresh interval"));
+ assert(!find_label(offline,"Automatic sync") && !find_label(offline,"Refresh interval") && !find_label(offline,"Only while charging"));
  assert(!find_label(offline,"Choose songs") && !find_label(offline,"Choose albums") && !find_label(offline,"Choose server playlists"));
  label=find_label(offline,"Remove all downloads");assert(label && lv_obj_check_type(lv_obj_get_parent(label),&lv_button_class));
  lv_obj_t *offline_content=lv_obj_get_parent(lv_obj_get_parent(label));
@@ -434,11 +469,15 @@ static void test_navidrome_controls(subsonic_client_t *client,gui_config_t *cfg)
  assert(!subsonicoffline_busy());
  assert(library_offline_options(source,&opt) && opt.last_run>0);
  assert(library_remote_count(source)==51);
- opt.mode=OFFLINE_OFF;opt.automatic=1;assert(library_offline_save_options(source,&opt));
+ opt.mode=OFFLINE_OFF;opt.automatic=1;opt.charging_only=1;assert(library_offline_save_options(source,&opt));
+ test_charging=false;
+ lv_tick_inc(1100);offline_retry_at=0;offline_and_probe_tick();assert(!busy); // scheduled sync waits on battery
+ assert(library_offline_options(source,&opt) && opt.last_run==0);
+ test_charging=true;
  lv_tick_inc(1100);offline_retry_at=0;offline_and_probe_tick();assert(busy);pump_request();wait_scan();
  assert(library_offline_options(source,&opt) && opt.mode==OFFLINE_OFF && opt.last_run>0);
  assert(!subsonicoffline_busy()); // full automatic refresh works without offline downloads
- opt.automatic=0;assert(library_offline_save_options(source,&opt));
+ opt.automatic=0;test_charging=false;assert(library_offline_save_options(source,&opt));
 }
 
 
@@ -557,10 +596,17 @@ static void test_context_downloads(subsonic_client_t *client,const char *root,co
  assert(subsonicpage_download_paths(paths,1,OFFLINE_SONG,NULL,false));wait_offline();
  assert(access(path,F_OK)==0);
  int tracks=library_track_count();
- remove_all_confirmed(NULL);wait_offline();
+ assert(library_offline_options(source,&options));options.mode=OFFLINE_MIRROR;options.auto_cache=true;
+ assert(library_offline_save_options(source,&options));
+ lv_obj_t *before_remove=lv_screen_active();subsonicofflinepage_open();
+ assert(!find_label(lv_screen_active(),"Automatically cache recently played"));
+ assert(subsonicpage_remove_all_downloads());assert(find_label(lv_layer_top(),"Remove all"));confirm_close();
+ remove_all_confirmed(NULL);
+ assert(find_label(lv_screen_active(),"Automatically cache recently played")); // Selective mode is redrawn immediately
+ wait_offline();switch_screen_return_to(before_remove);
  assert(access(path,F_OK)!=0 && access(local,F_OK)==0 && access(other_path,F_OK)==0);
  assert(library_track_count()==tracks && library_remote_count(source)==51);
- assert(library_offline_options(source,&options) && options.mode==OFFLINE_SELECTIVE && !options.auto_cache);
+ assert(library_offline_options(source,&options) && options.mode==OFFLINE_SELECTIVE && options.auto_cache);
  assert(!library_offline_has_rule(source,OFFLINE_SONG,"catalog-9"));
  refresh_gui();assert(find_glyph(medialist_tracks_screen,&icon_download) && !find_glyph(medialist_tracks_screen,&icon_trash));
 

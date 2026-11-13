@@ -489,3 +489,34 @@ Regression coverage uses isolated simulator data for single/all download
 removal, temporary/interrupted sidecars, shared versus orphan artwork, orphan
 owned downloads, server playlist backups, local/other-account preservation,
 failed cleanup/retry, and reopening the library after connection removal.
+
+
+## Connection settings
+
+Server address, Username and Password remain visible above the general sync
+controls, including after connecting. Passwords are masked. Finishing a changed
+field automatically attempts login once all three fields are nonempty; accepting
+an unchanged field or leaving fields incomplete does not send a request.
+There is no separate Connect button. If offline work is running, the connection
+attempt waits for it to finish.
+
+Automatic sync, Offline / cache settings and Sync remain visible when no login
+has succeeded, but disabled. They enable for successfully established/saved
+matching credentials, even while the server is temporarily offline. Edited
+credentials that have not succeeded do not expose controls for the old account.
+Refresh interval remains conditional on Automatic sync being enabled.
+
+
+Only while charging now belongs to the general Automatic sync controls and is
+shown only when Automatic sync is on. It gates the start of scheduled catalog,
+artwork, playlist and offline refreshes. Explicit Sync and Download actions,
+playback downloads and automatic playback caching ignore this preference.
+It does not cancel a sync already running when the charger is disconnected.
+Existing saved charging preferences are retained in their new location.
+
+
+New accounts default to a 4 GiB offline storage budget; 2 GiB is also available
+on the storage slider. Existing configured budgets are retained. Remove all
+downloads uses the confirmation label Remove all, resets Offline mode to
+Selective immediately in the visible settings page, and preserves the automatic
+playback caching preference. It does not turn that preference off.
