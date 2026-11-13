@@ -1,4 +1,5 @@
 #include "audio.h"
+#include "src/system/remote/speaker_output.h"
 #include "src/system/audio/alsa-controls.h"
 #include "src/system/bluetooth/bluetooth.h"
 #include "src/system/decode/decode.h"
@@ -523,7 +524,7 @@ static bool seek_request = false;
 static bool track_completed = false;
 static void (*completion_hook)(void);
 
-void audio_set_completion_hook(void (*hook)(void)) { completion_hook = hook; }
+void audio_set_completion_hook(void (*hook)(void)) { completion_hook = hook; speaker_output_set_completion_cb(hook); }
 
 // Marks the end of a track's playback routine. The catch is that tearing down
 // the old track happens *after* audio_play() has already announced the new one
@@ -4116,6 +4117,7 @@ int audio_init(void) {
 }
 
 int audio_play(const char *filepath) {
+	if (speaker_output_active()) { speaker_output_play(filepath, 0, false); return 0; }
 	fprintf(stderr, "audio[%ld]: play requested '%s'\n", log_ms(), filepath);
 
 	// NO route write here: this runs on the UI thread while the previous
@@ -4162,6 +4164,7 @@ int audio_play(const char *filepath) {
 // mutex: otherwise the playback thread could open the file and push its first
 // second out of the speakers before the seek reached it.
 int audio_play_at(const char *filepath, double start_secs) {
+	if (speaker_output_active()) { speaker_output_play(filepath, start_secs, false); return 0; }
 	fprintf(stderr, "audio[%ld]: play requested '%s' from %.1f s\n", log_ms(), filepath, start_secs);
 
 	pthread_mutex_lock(&audio_mutex);
@@ -4187,6 +4190,7 @@ int audio_play_at(const char *filepath, double start_secs) {
 }
 
 int audio_play_paused(const char *filepath, double start_secs) {
+	if (speaker_output_active()) { speaker_output_play(filepath, start_secs, true); return 0; }
 	fprintf(stderr, "audio[%ld]: restore requested '%s' at %.1f s (paused)\n", log_ms(), filepath, start_secs);
 
 	pthread_mutex_lock(&audio_mutex);
@@ -4338,6 +4342,7 @@ bool audio_suspend_freeze(int timeout_ms) {
 }
 
 void audio_pause(void) {
+	if (speaker_output_active()) { speaker_output_transport(AUDIO_STATUS_PAUSED); return; }
 	printf("pausing\n");
 	pthread_mutex_lock(&audio_mutex);
 	audio_command = AUDIO_CMD_PAUSE;
@@ -4353,6 +4358,7 @@ void audio_pause(void) {
 }
 
 void audio_resume(void) {
+	if (speaker_output_active()) { speaker_output_transport(AUDIO_STATUS_PLAYING); return; }
 	// The fresh restart, when the freeze armed one: the track context no longer
 	// exists (killed before mem, deliberately), so "resume" here means
 	// rebuilding everything from scratch at the right point -- fresh decoder,
@@ -4384,6 +4390,7 @@ void audio_resume(void) {
 }
 
 void audio_stop(void) {
+	if (speaker_output_active()) { speaker_output_transport(AUDIO_STATUS_STOPPED); return; }
 	printf("stopping\n");
 	pthread_mutex_lock(&audio_mutex);
 	audio_command = AUDIO_CMD_STOP;
@@ -4403,6 +4410,7 @@ void audio_unload(void) {
     pthread_mutex_unlock(&audio_mutex);
 }
 audio_status_t audio_get_status(void) {
+	if (speaker_output_active()) return speaker_output_status();
 	pthread_mutex_lock(&audio_mutex);
 	audio_status_t status = playback_status;
 	pthread_mutex_unlock(&audio_mutex);
@@ -4410,6 +4418,7 @@ audio_status_t audio_get_status(void) {
 }
 
 bool audio_take_completion(void) {
+	if (speaker_output_active()) return speaker_output_take_completion();
 	pthread_mutex_lock(&audio_mutex);
 	bool completed = track_completed;
 	track_completed = false;
@@ -4418,6 +4427,7 @@ bool audio_take_completion(void) {
 }
 
 void audio_get_current_file(char *out, size_t out_size) {
+	if (speaker_output_active()) { if(out && out_size) speaker_output_file(out,out_size); return; }
 	if (!out || out_size == 0)
 		return;
 	pthread_mutex_lock(&audio_mutex);
@@ -4427,6 +4437,7 @@ void audio_get_current_file(char *out, size_t out_size) {
 }
 
 void audio_get_progress(double *current_secs, double *total_secs) {
+	if (speaker_output_active()) { speaker_output_progress(current_secs,total_secs); return; }
 	pthread_mutex_lock(&audio_mutex);
 	double current = progress_current_secs;
 	if (progress_floor_secs >= 0.0) {
@@ -4444,6 +4455,7 @@ void audio_get_progress(double *current_secs, double *total_secs) {
 }
 
 void audio_get_stream_info(int *sample_rate, int *channels) {
+	if(speaker_output_active()) { if(sample_rate)*sample_rate=0; if(channels)*channels=0; return; }
 	pthread_mutex_lock(&audio_mutex);
 	if (sample_rate)
 		*sample_rate = stream_sample_rate;
@@ -4453,6 +4465,7 @@ void audio_get_stream_info(int *sample_rate, int *channels) {
 }
 
 int audio_get_stream_bits(void) {
+	if(speaker_output_active())return 0;
 	pthread_mutex_lock(&audio_mutex);
 	int bits = stream_bits;
 	pthread_mutex_unlock(&audio_mutex);
@@ -4460,6 +4473,7 @@ int audio_get_stream_bits(void) {
 }
 
 int audio_get_stream_bitrate_kbps(void) {
+	if(speaker_output_active())return 0;
 	pthread_mutex_lock(&audio_mutex);
 	int kbps = stream_bitrate_kbps;
 	pthread_mutex_unlock(&audio_mutex);
@@ -4467,6 +4481,7 @@ int audio_get_stream_bitrate_kbps(void) {
 }
 
 bool audio_stream_is_lossy(void) {
+	if(speaker_output_active())return false;
 	pthread_mutex_lock(&audio_mutex);
 	bool lossy = stream_lossy;
 	pthread_mutex_unlock(&audio_mutex);
@@ -4483,6 +4498,7 @@ void audio_get_stream_codec(char *out, size_t size) {
 }
 
 int audio_get_dsd_multiple(void) {
+	if(speaker_output_active())return 0;
 	pthread_mutex_lock(&audio_mutex);
 	int m = stream_dsd_multiple;
 	pthread_mutex_unlock(&audio_mutex);
@@ -4505,6 +4521,7 @@ double audio_get_speed(void) {
 }
 
 void audio_seek(double seconds) {
+	if (speaker_output_active()) { speaker_output_seek(seconds); return; }
 	printf("seeking to %.2f seconds\n", seconds);
 
 	pthread_mutex_lock(&audio_mutex);
@@ -4660,6 +4677,7 @@ static bool external_wait_closed(int ms) {
 #define EXTERNAL_YIELD_WAIT_MS 1000
 
 bool audio_external_begin_latency(int sample_rate, int channels, int bits, int buffer_ms) {
+	if(speaker_output_active())speaker_output_local();
 	// A PCM held by gapless occupies the DAC. Callers here want to open one of
 	// their own on the same device, and without this they find it busy right
 	// after a track has ended on its own.
@@ -4707,6 +4725,7 @@ bool audio_external_begin_latency(int sample_rate, int channels, int bits, int b
 }
 
 bool audio_external_begin_yielding(int sample_rate, int channels, int bits, int buffer_ms) {
+	if(speaker_output_active())speaker_output_local();
 	// Never shares: a PCM some other source holds is asked back first (the
 	// AirPlay receiver keeps one while it is merely switched on), and if it
 	// does not come back the answer is no.

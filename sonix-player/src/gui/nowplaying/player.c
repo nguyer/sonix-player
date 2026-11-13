@@ -1,3 +1,10 @@
+#include "src/system/remote/speaker_output.h"
+#include "src/gui/wireless/speakers.h"
+#ifdef HOST_BUILD
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <netinet/in.h>
+#endif
 #include "player.h"
 
 #include <pthread.h>
@@ -199,6 +206,7 @@ static lv_obj_t *cover_placeholder_icon;
 // apply_live_mode() can reach them.
 static lv_obj_t *prev_btn_obj;
 static lv_obj_t *next_btn_obj;
+static lv_obj_t *wireless_btn_obj, *wireless_icon;
 static lv_obj_t *more_btn_obj;
 static lv_obj_t *more_btn_icon; // ellipsis on a track, chapters on a book
 static lv_obj_t *repeat_btn_obj;
@@ -954,8 +962,36 @@ static void cover_show(bool have_cover) {
 	}
 }
 
+static bool output_network_connected(void) {
+    wifi_status_t status;wifi_get_status(&status);
+#ifdef HOST_BUILD
+    // WSL exposes the host LAN as Ethernet, rather than a controllable wlan0.
+    // Use live host interfaces when the simulator has no Wi-Fi hardware.
+    if(!wifi_available()) {
+        struct ifaddrs *interfaces=NULL;
+        if(getifaddrs(&interfaces))return false;
+        bool connected=false;
+        for(struct ifaddrs *i=interfaces;i;i=i->ifa_next)
+            if(i->ifa_addr && i->ifa_addr->sa_family==AF_INET &&
+               (i->ifa_flags & IFF_UP) && (i->ifa_flags & IFF_RUNNING) &&
+               !(i->ifa_flags & IFF_LOOPBACK)) { connected=true;break; }
+        freeifaddrs(interfaces);return connected;
+    }
+#endif
+    return status.state==WIFI_STATE_CONNECTED && status.ip[0];
+}
+void player_refresh_wireless_output(void) {
+    if(!wireless_icon)return;
+    lv_obj_set_hidden(wireless_btn_obj,!output_network_connected());
+    bool active=speaker_output_active();
+    lv_obj_set_style_image_recolor(wireless_icon,
+        active ? (chrome_over_cover ? lv_color_white() : theme()->text_primary) : lv_color_make(150,150,150),0);
+    lv_obj_set_style_image_recolor_opa(wireless_icon,LV_OPA_COVER,0);
+}
+
 static void set_over_cover(bool on) {
 	chrome_over_cover = on;
+	player_refresh_wireless_output();
 
 	lv_obj_t *const text_objs[] = {song_title_label, elapsed_label, remaining_label};
 	lv_obj_t *const dim_objs[] = {song_artist_label, format_label, queue_position_label};
@@ -2796,6 +2832,10 @@ static void studio_take_back(void) {
 
 	if (more_btn_obj && controls_row) {
 		lv_obj_set_parent(more_btn_obj, controls_row);
+        if(wireless_btn_obj) {
+            lv_obj_set_parent(wireless_btn_obj,controls_row);
+            lv_obj_align(wireless_btn_obj,LV_ALIGN_RIGHT_MID,-48,0);
+        }
 		lv_obj_set_ignore_layout(more_btn_obj, true);
 		lv_obj_align(more_btn_obj, LV_ALIGN_RIGHT_MID, 0, 0);
 	}
@@ -2841,6 +2881,10 @@ static void studio_put(void) {
 	// is about, and the star takes the corner of the transport row it left.
 	if (more_btn_obj && studio_head) {
 		lv_obj_set_parent(more_btn_obj, studio_head);
+        if(wireless_btn_obj) {
+            lv_obj_set_parent(wireless_btn_obj,studio_head);
+            lv_obj_align(wireless_btn_obj,LV_ALIGN_RIGHT_MID,-48,0);
+        }
 		lv_obj_set_ignore_layout(more_btn_obj, true);
 		lv_obj_align(more_btn_obj, LV_ALIGN_RIGHT_MID, 0, 0);
 	}
@@ -4137,6 +4181,7 @@ static void track_end_hook(void) { gui_post(track_end_async, NULL); }
 // single point that keeps the play/pause button and the progress bar from
 // going stale once a track finishes on its own.
 static void update_progress(void) {
+    player_refresh_wireless_output(); // shared playback refresh also follows link visibility
 	// Auto-advance or loop the folder when the track has played through.
 	if (device_state_take_completion()) {
 		handle_track_finished();
@@ -5085,6 +5130,8 @@ void player_sheet_attach_drag(lv_obj_t *obj, bool opening) {
 }
 
 // Builds the player sheet: artwork, controls and the poll that drives them.
+static void wireless_output_cb(lv_event_t *event) { (void)event; speakers_output_open(); }
+
 void player_init(gui_config_t *cfg) {
 	// The artwork decodes on the shared worker; make sure it exists before
 	// the first track can be started. Safe to call more than once.
@@ -5333,6 +5380,7 @@ void player_init(gui_config_t *cfg) {
 	lv_obj_set_style_text_font(queue_position_label, &font_ui_18, 0);
 	lv_obj_set_align(queue_position_label, LV_ALIGN_CENTER);
 
+
 	// Transport: prev, play/pause, next -- with the repeat toggle parked on
 	// the left, out of the way of the transport controls.
 	lv_obj_t *player_controls_buttons = lv_obj_create(player_menu);
@@ -5390,12 +5438,12 @@ void player_init(gui_config_t *cfg) {
 	lv_obj_t *more_btn = lv_btn_create(player_controls_buttons);
 	more_btn_obj = more_btn;
 	lv_obj_set_ignore_layout(more_btn, true);
-	lv_obj_set_size(more_btn, 56, 56);
+	lv_obj_set_size(more_btn, 48, 48);
 	lv_obj_set_style_bg_opa(more_btn, 0, 0);
 	lv_obj_set_style_shadow_width(more_btn, 0, 0);
 	lv_obj_add_event_cb(more_btn, more_btn_event_cb, LV_EVENT_CLICKED, NULL);
 	lv_obj_align(more_btn, LV_ALIGN_RIGHT_MID, 0, 0);
-	lv_obj_set_ext_click_area(more_btn, CORNER_BTN_EXT_CLICK);
+	// Adjacent output/overflow controls each have their own 48px touch target.
 
 	lv_obj_t *more_icon = lv_image_create(more_btn);
 	more_btn_icon = more_icon;
@@ -5405,11 +5453,25 @@ void player_init(gui_config_t *cfg) {
 	lv_obj_set_style_image_recolor_opa(more_icon, LV_OPA_COVER, 0);
 	lv_obj_center(more_icon);
 
+    wireless_btn_obj=lv_btn_create(player_controls_buttons);
+    lv_obj_set_ignore_layout(wireless_btn_obj,true);
+    lv_obj_set_size(wireless_btn_obj,48,48);
+    lv_obj_set_style_bg_opa(wireless_btn_obj,LV_OPA_TRANSP,0);
+    lv_obj_set_style_shadow_width(wireless_btn_obj,0,0);
+    lv_obj_align(wireless_btn_obj,LV_ALIGN_RIGHT_MID,-48,0);
+    lv_obj_add_event_cb(wireless_btn_obj,wireless_output_cb,LV_EVENT_CLICKED,NULL);
+    wireless_icon=lv_image_create(wireless_btn_obj);
+    lv_image_set_src(wireless_icon,&icon_airplay_quick);
+    lv_obj_add_style(wireless_icon,&theme_style_icon,0);
+    lv_image_set_scale(wireless_icon,192);
+    lv_obj_center(wireless_icon);
+    player_refresh_wireless_output();
+
 	// No button chrome on prev/next: they sit on top of the blurred artwork,
 	// and plain glyphs read better there than filled boxes.
 	lv_obj_t *prev_btn = lv_btn_create(player_controls_buttons);
 	prev_btn_obj = prev_btn;
-	lv_obj_set_size(prev_btn, 76, 76);
+	lv_obj_set_size(prev_btn, 64, 76);
 	lv_obj_set_style_bg_opa(prev_btn, 0, 0);
 	lv_obj_set_style_shadow_width(prev_btn, 0, 0);
 	prev_icon = lv_image_create(prev_btn);
@@ -5436,7 +5498,7 @@ void player_init(gui_config_t *cfg) {
 
 	lv_obj_t *next_btn = lv_btn_create(player_controls_buttons);
 	next_btn_obj = next_btn;
-	lv_obj_set_size(next_btn, 76, 76);
+	lv_obj_set_size(next_btn, 64, 76);
 	lv_obj_set_style_bg_opa(next_btn, 0, 0);
 	lv_obj_set_style_shadow_width(next_btn, 0, 0);
 	next_icon = lv_image_create(next_btn);
@@ -5622,7 +5684,7 @@ void player_init(gui_config_t *cfg) {
 	// against one of them.
 	studio_text_col = lv_obj_create(studio_head);
 	lv_obj_remove_style_all(studio_text_col);
-	lv_obj_set_size(studio_text_col, cover_size - 2 * STUDIO_MARGIN - 2 * 68, LV_SIZE_CONTENT);
+	lv_obj_set_size(studio_text_col, cover_size - 2 * STUDIO_MARGIN - 2 * 100, LV_SIZE_CONTENT);
 	lv_obj_align(studio_text_col, LV_ALIGN_CENTER, 0, 0);
 	lv_obj_set_flex_flow(studio_text_col, LV_FLEX_FLOW_COLUMN);
 	lv_obj_set_flex_align(studio_text_col, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);

@@ -1,3 +1,4 @@
+#include "src/system/remote/speaker_output.h"
 #include "device_state.h"
 #include "src/system/streaming/subsonicavailability.h"
 
@@ -1368,7 +1369,7 @@ bool device_state_advance_auto(char *out_path, size_t out_size) {
 void device_state_read_ahead(double position, double total) {
 	// Only where gapless can use it: what it buys is the next track opening
 	// before the queue held at the end of this one runs out.
-	if (!audio_get_gapless() || radio_is_active() || total <= 0.0 || position < READAHEAD_SETTLE_SECS ||
+	if (speaker_output_active() || !audio_get_gapless() || radio_is_active() || total <= 0.0 || position < READAHEAD_SETTLE_SECS ||
 		total - position > READAHEAD_LEAD_SECS) {
 		return;
 	}
@@ -1674,9 +1675,9 @@ void device_state_forget_remote(const char *source) {
 }
 void device_state_stop(void) { audio_stop(); }
 
-void device_state_set_volume(long volume) { set_volume(volume); }
+void device_state_set_volume(long volume) { if(speaker_output_active()) speaker_output_set_volume(volume); else set_volume(volume); }
 
-void device_state_change_volume(long amount) { change_volume(amount); }
+void device_state_change_volume(long amount) { if(speaker_output_active()) change_volume_percent(amount); else change_volume(amount); }
 
 int device_state_get_volume_percent(void) { return get_volume_percent(); }
 

@@ -1,3 +1,4 @@
+#include "src/system/remote/speaker_output.h"
 #include "alsa-controls.h"
 
 #include "src/system/audio/audio.h"
@@ -1048,7 +1049,7 @@ void volume_profile_set_bluetooth(bool bluetooth) {
 	}
 }
 
-int get_volume_percent(void) { return current_percent; }
+int get_volume_percent(void) { return speaker_output_active() ? speaker_output_volume() : current_percent; }
 
 // The level, on the hardware, without touching the two saved profile levels.
 // This is the "apply the volume index" of the stock player: it walks the gain
@@ -1089,6 +1090,7 @@ static void apply_volume_hw(int percent) {
 }
 
 void set_volume_percent(int percent) {
+	if (speaker_output_active()) { speaker_output_set_volume(percent); return; }
 	if (percent < 0) {
 		percent = 0;
 	}
@@ -1117,7 +1119,7 @@ void set_volume_percent(int percent) {
 	apply_volume_hw(percent);
 }
 
-void change_volume_percent(int delta) { set_volume_percent(get_volume_percent() + delta); }
+void change_volume_percent(int delta) { if(speaker_output_active())speaker_output_change_volume(delta); else set_volume_percent(get_volume_percent() + delta); }
 
 bool lineout_is_active(void) { return lineout_on; }
 

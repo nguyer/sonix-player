@@ -1,3 +1,4 @@
+#include "src/system/remote/speaker_output.h"
 /*
  * This file is largely LLM-written, be warned
  */
@@ -23,6 +24,7 @@
 #include "src/system/device/clock.h"
 #include "src/system/playback/device_state.h"
 #include "src/system/remote/dlna.h"
+#include "src/system/remote/speaker_share.h"
 #include "src/system/remote/sonixlink.h"
 #include "src/system/streaming/qobuzcache.h"
 #include "src/system/streaming/podcastcache.h"
@@ -640,7 +642,7 @@ static bool wifi_in_use(void) {
 	// A scan or a connect in flight counts as use: parking the radio out from
 	// under wpa_supplicant mid-association leaves the driver to sort out a
 	// teardown it did not expect.
-	return wifi_busy() || wifi_scan_running() || streaming_playback_active() || airplay_get_enabled() ||
+	return speaker_output_active() || speaker_share_active() || wifi_busy() || wifi_scan_running() || streaming_playback_active() || airplay_get_enabled() ||
 		   dlna_get_enabled() || sonixlink_get_enabled() ||
 		   wifitransfer_get_enabled() || qobuzcache_downloading_id() > 0 ||
 		   qobuzcache_network_wanted() || tidalcache_downloading_id() > 0 || tidalcache_network_wanted() ||
@@ -693,7 +695,7 @@ static bool bluetooth_in_use(void) {
 // user doing something, and switching off under their fingers is not what a
 // shutdown timer is for.
 static bool player_is_busy(bool playing, uint32_t input_idle) {
-	return playing ||							   // a track or a station
+	return speaker_output_active() || speaker_share_active() || playing || // a shared track must remain readable with the screen off
 		   input_idle < POWER_TICK_MS * 4 ||	   // a key just pressed
 		   usbdac_is_active() ||				   // a computer feeding the DAC
 		   usb_storage_active() ||				   // the card exported over USB

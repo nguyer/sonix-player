@@ -11,6 +11,8 @@
 extern lv_obj_t *player_screen;
 
 void player_init(gui_config_t *cfg);
+// GUI thread: output selection and theme changes recolour the wireless glyph.
+void player_refresh_wireless_output(void);
 
 // Start playing the given file and switch its now-playing info in the UI.
 // Does not bring the player up; call player_sheet_open() separately.
