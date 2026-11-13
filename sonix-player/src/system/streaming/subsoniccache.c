@@ -1,3 +1,4 @@
+#include "src/system/library/libraryremote.h"
 #include "subsoniccache.h"
 #include "src/system/core/md5.h"
 #include <dirent.h>
@@ -175,10 +176,7 @@ bool subsoniccache_discard_temporary(const subsonic_client_t *client,const char 
  char expected[512];if(!subsoniccache_path(client,&song,root,expected,sizeof(expected)) || strcmp(path,expected))return false;
  char pin[560];snprintf(pin,sizeof(pin),"%s.offline",path);
  if(access(pin,F_OK)==0){unlink(marker);return true;}
- struct stat st;if(lstat(path,&st)==0){if(!S_ISREG(st.st_mode) || unlink(path)!=0)return false;}else if(errno!=ENOENT)return false;
- const char *suffixes[]={".tags",".identity",".temporary"};
- for(int i=0;i<3;++i){snprintf(marker,sizeof(marker),"%s%s",path,suffixes[i]);if(unlink(marker)!=0 && errno!=ENOENT)return false;}
- return true;
+ return subsoniccache_remove_owned(client,root,path,identity.song_id);
 }
 void subsoniccache_cleanup_temporary(const subsonic_client_t *client,const char *root,const char *keep){
  char directory[560];snprintf(directory,sizeof(directory),"%s/.local/subsonic-cache",root);
@@ -202,12 +200,21 @@ bool subsoniccache_remove_owned(const subsonic_client_t *client,const char *root
  const char *suffixes[]={".offline",".temporary",".part",".tags.tmp",".identity.tmp",".tags",".identity"};
  subsonic_identity_t identity;
  if(!subsoniccache_identity(path,&identity)){
-  if(exists)return false;
-  for(unsigned i=0;i<sizeof(suffixes)/sizeof(suffixes[0]);++i){char side[560];snprintf(side,sizeof(side),"%s%s",path,suffixes[i]);if(lstat(side,&st)==0 || errno!=ENOENT)return false;}
-  return true;
- }
- if(strcmp(identity.server,client->base_url) || strcmp(identity.username,client->username) || strcmp(identity.song_id,id))return false;
+  library_remote_track_t remote;
+  bool catalog=library_remote_get(path,&remote) && !strcmp(remote.server,client->base_url) &&
+   !strcmp(remote.username,client->username) && !strcmp(remote.song.id,id);
+  if(!catalog){
+   if(exists)return false;
+   for(unsigned i=0;i<sizeof(suffixes)/sizeof(suffixes[0]);++i){char side[560];snprintf(side,sizeof(side),"%s%s",path,suffixes[i]);if(lstat(side,&st)==0 || errno!=ENOENT)return false;}
+   return true;
+  }
+ }else if(strcmp(identity.server,client->base_url) || strcmp(identity.username,client->username) || strcmp(identity.song_id,id))return false;
  if(exists && unlink(path)!=0)return false;
+ const char *lyrics[]={".lrc",".lrc.part"};
+ for(unsigned i=0;i<sizeof(lyrics)/sizeof(lyrics[0]);i++){
+  char side[560];snprintf(side,sizeof(side),"%.*s%s",(int)(dot-path),path,lyrics[i]);
+  if(unlink(side)!=0 && errno!=ENOENT)return false;
+ }
  // Keep identity until last: failed/interrupted removal can be retried safely.
  for(unsigned i=0;i<sizeof(suffixes)/sizeof(suffixes[0]);++i){
   char side[560];snprintf(side,sizeof(side),"%s%s",path,suffixes[i]);if(unlink(side)!=0 && errno!=ENOENT)return false;

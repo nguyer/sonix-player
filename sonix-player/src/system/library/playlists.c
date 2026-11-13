@@ -1251,3 +1251,11 @@ bool playlists_file_stamp(const char *name, char *path_out, size_t path_size, lo
 	}
 	return true;
 }
+
+bool playlists_remove_backup(const char *name) {
+    char path[600],temporary[620];
+    if(!file_for(name,path,sizeof(path)))return false;
+    if(unlink(path)!=0 && errno!=ENOENT)return false;
+    snprintf(temporary,sizeof(temporary),"%s.tmp",path);
+    return unlink(temporary)==0 || errno==ENOENT;
+}

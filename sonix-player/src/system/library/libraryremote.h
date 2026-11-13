@@ -20,8 +20,11 @@ bool library_remote_removed_pending(const char *source,const char *keep);
 // Fill missing display tags from the persistent catalog, even before audio exists.
 bool library_remote_metadata(const char *path,song_metadata_t *metadata);
 bool library_remote_get(const char *path, library_remote_track_t *row);
+int library_remote_files(const char *source,int offset,library_remote_removed_t *rows,int capacity);
+bool library_remote_forget(const char *source);
 int library_remote_count(const char *source);
 // Unique cover IDs for a staged catalog, with album-ID fallback.
+int library_remote_art_ids(const char *source,int offset,char ids[][128],int capacity);
 int library_remote_covers(const char *source, int offset, char ids[][128], int capacity);
 
 typedef struct {

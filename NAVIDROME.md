@@ -457,3 +457,35 @@ tags; song IDs and album IDs remain untouched. Startup normalizes persisted
 remote album names and restores both album name and server album key on existing
 media rows. This repairs albums split by trailing-space differences between
 server metadata and downloaded-file tags, and removes the empty legacy groups.
+
+
+## Download and connection removal
+
+Remove download / Remove all downloads delete owned audio, identity/tag files,
+pin/temporary markers, interrupted transfer files and saved lyric sidecars.
+Ownership is checked against the account identity and deterministic cache path;
+catalog metadata can prove ownership for an interrupted transfer with no
+identity file yet. Unreferenced artwork for the account is pruned. Artwork still
+used by its synced catalog remains, so albums continue to show covers even
+when their audio is not downloaded.
+
+Remove connection now removes the account's cached audio and artwork, remote
+catalog entries and empty album/artist groups, offline settings/rules/manifests,
+server-linked playlist tables and their backups, and remembered/history/favorite
+references to its tracks. References to those tracks are removed from local
+playlists, while the local-only playlists themselves and their local tracks
+remain. The active track is unloaded and owned queue entries removed before
+background cleanup. Other accounts and their owned files are preserved.
+
+The confirmation explains this scope. Cleanup is local; nothing is deleted on
+the server. File cleanup runs before the transactional library purge and saved
+login removal, so a file failure leaves the connection available for retry.
+Legacy generated image/waveform keys do not contain account ownership:
+connection removal resets those disposable music caches, preserving book cover
+caches and all source music. Images/waveforms for retained music rebuild on use.
+Deleted image rows are vacuumed to release their stored pixels and disk space.
+
+Regression coverage uses isolated simulator data for single/all download
+removal, temporary/interrupted sidecars, shared versus orphan artwork, orphan
+owned downloads, server playlist backups, local/other-account preservation,
+failed cleanup/retry, and reopening the library after connection removal.

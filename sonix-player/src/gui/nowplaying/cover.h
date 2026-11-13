@@ -239,4 +239,5 @@ bool cover_book_cached(const char *path, int box_w, int box_h, cover_image_t *ou
 // one, and its title.
 void cover_book_store(const char *path, int box_w, int box_h, const cover_image_t *cover, const char *title);
 
+bool cover_clear_music_cache(void);
 #endif // COVER_H

@@ -240,3 +240,84 @@ bool library_remote_removed_done(const char *source,const char *path){
  if(!ok && transaction)exec("ROLLBACK");
  pthread_mutex_unlock(&db_lock);return ok;
 }
+
+int library_remote_files(const char *source,int offset,library_remote_removed_t *rows,int capacity) {
+    pthread_mutex_lock(&db_lock);sqlite3_stmt *s=NULL;int count=-1;
+    const char *sql="SELECT path,remote_id FROM REMOTE_MEDIA WHERE source=?1 UNION SELECT path,remote_id FROM REMOTE_REMOVED WHERE source=?1 ORDER BY path LIMIT ?2 OFFSET ?3";
+    if(db && sqlite3_prepare_v2(db,sql,-1,&s,NULL)==SQLITE_OK) {
+        sqlite3_bind_text(s,1,source,-1,SQLITE_TRANSIENT);sqlite3_bind_int(s,2,capacity);sqlite3_bind_int(s,3,offset);
+        count=0;int rc;
+        while((rc=sqlite3_step(s))==SQLITE_ROW && count<capacity) {
+            snprintf(rows[count].path,sizeof(rows[count].path),"%s",sqlite3_column_text(s,0));
+            snprintf(rows[count].id,sizeof(rows[count].id),"%s",sqlite3_column_text(s,1));count++;
+        }
+        if(rc!=SQLITE_DONE)count=-1;
+    }
+    sqlite3_finalize(s);pthread_mutex_unlock(&db_lock);return count;
+}
+bool library_remote_forget(const char *source) {
+    pthread_mutex_lock(&db_lock);
+    bool transaction=db && source && *source && !scan_running && exec("BEGIN");
+    bool ok=transaction;sqlite3_stmt *s=NULL;
+    if(ok)ok=exec("CREATE TEMP TABLE IF NOT EXISTS forgotten_paths(path TEXT PRIMARY KEY)") && exec("DELETE FROM forgotten_paths");
+    const char *capture[]={
+        "INSERT OR IGNORE INTO forgotten_paths SELECT path FROM REMOTE_MEDIA WHERE source=?",
+        "INSERT OR IGNORE INTO forgotten_paths SELECT path FROM REMOTE_REMOVED WHERE source=?",
+        "INSERT OR IGNORE INTO forgotten_paths SELECT path FROM SUBSONIC_OFFLINE_FILES WHERE source=?"};
+    for(unsigned i=0;ok && i<sizeof(capture)/sizeof(capture[0]);i++) {
+        ok=sqlite3_prepare_v2(db,capture[i],-1,&s,NULL)==SQLITE_OK;
+        if(ok){sqlite3_bind_text(s,1,source,-1,SQLITE_TRANSIENT);ok=sqlite3_step(s)==SQLITE_DONE;}
+        sqlite3_finalize(s);s=NULL;
+    }
+    if(ok) {
+        char sql[320];
+        snprintf(sql,sizeof(sql),"DELETE FROM PLAYBACK_QUEUE_QUERY WHERE instr(value,?1)>0 OR (kind=%d AND value IN (SELECT local_name FROM REMOTE_PLAYLISTS WHERE source=?1))",LIBRARY_LIST_PLAYLIST);
+        ok=sqlite3_prepare_v2(db,sql,-1,&s,NULL)==SQLITE_OK;
+        if(ok){sqlite3_bind_text(s,1,source,-1,SQLITE_TRANSIENT);ok=sqlite3_step(s)==SQLITE_DONE;}
+        sqlite3_finalize(s);s=NULL;
+    }
+    char **tables=NULL;int count=0,columns=0;
+    if(ok)ok=sqlite3_get_table(db,"SELECT name FROM sqlite_master WHERE type='table' AND substr(name,1,4)='M3U_'",&tables,&count,&columns,NULL)==SQLITE_OK;
+    for(int i=1;ok && i<=count;i++) {
+        bool owned=false;
+        ok=sqlite3_prepare_v2(db,"SELECT 1 FROM REMOTE_PLAYLISTS WHERE source=? AND ('M3U_'||local_name)=? COLLATE NOCASE",-1,&s,NULL)==SQLITE_OK;
+        if(ok) {
+            sqlite3_bind_text(s,1,source,-1,SQLITE_TRANSIENT);sqlite3_bind_text(s,2,tables[i],-1,SQLITE_TRANSIENT);
+            int rc=sqlite3_step(s);owned=rc==SQLITE_ROW;ok=rc==SQLITE_ROW || rc==SQLITE_DONE;
+        }
+        sqlite3_finalize(s);s=NULL;
+        char *sql=sqlite3_mprintf(owned ? "DROP TABLE \"%w\"" : "DELETE FROM \"%w\" WHERE path IN forgotten_paths",tables[i]);
+        if(ok)ok=sql && exec(sql);
+        sqlite3_free(sql);
+    }
+    sqlite3_free_table(tables);
+    const char *path_tables[]={"FAVOURITES","PLAY_COUNTS","PLAY_HISTORY","PLAYBACK_STATE","PLAYBACK_QUEUE","MEDIA_TABLE"};
+    for(unsigned i=0;ok && i<sizeof(path_tables)/sizeof(path_tables[0]);i++) {
+        char sql[180];snprintf(sql,sizeof(sql),"DELETE FROM %s WHERE path IN forgotten_paths",path_tables[i]);ok=exec(sql);
+    }
+    const char *source_tables[]={"REMOTE_STAGE","REMOTE_MEDIA","REMOTE_REMOVED","REMOTE_PLAYLISTS","REMOTE_PLAYLIST_DIRTY",
+        "SUBSONIC_OFFLINE_OPTIONS","SUBSONIC_OFFLINE_RULES","SUBSONIC_OFFLINE_FILES"};
+    for(unsigned i=0;ok && i<sizeof(source_tables)/sizeof(source_tables[0]);i++) {
+        char sql[140];snprintf(sql,sizeof(sql),"DELETE FROM %s WHERE source=?",source_tables[i]);
+        ok=sqlite3_prepare_v2(db,sql,-1,&s,NULL)==SQLITE_OK;
+        if(ok){sqlite3_bind_text(s,1,source,-1,SQLITE_TRANSIENT);ok=sqlite3_step(s)==SQLITE_DONE;}
+        sqlite3_finalize(s);s=NULL;
+    }
+    if(ok)ok=exec("DELETE FROM PLAYBACK_QUEUE_ALBUM WHERE NOT EXISTS(SELECT 1 FROM MEDIA_TABLE WHERE album=PLAYBACK_QUEUE_ALBUM.album)");
+    if(ok)ok=remote_restore();
+    if(ok){prune_links();prune_names();ok=exec("COMMIT");}
+    if(!ok && transaction)exec("ROLLBACK");
+    if(ok)bump_all_generations();
+    pthread_mutex_unlock(&db_lock);return ok;
+}
+
+int library_remote_art_ids(const char *source,int offset,char ids[][128],int capacity) {
+    pthread_mutex_lock(&db_lock);sqlite3_stmt *s=NULL;int count=-1;
+    if(db && sqlite3_prepare_v2(db,"SELECT DISTINCT COALESCE(NULLIF(cover_id,''),album_id) AS cover FROM REMOTE_MEDIA WHERE source=? AND COALESCE(NULLIF(cover_id,''),album_id)<>'' ORDER BY cover LIMIT ? OFFSET ?",-1,&s,NULL)==SQLITE_OK) {
+        sqlite3_bind_text(s,1,source,-1,SQLITE_TRANSIENT);sqlite3_bind_int(s,2,capacity);sqlite3_bind_int(s,3,offset);
+        count=0;int rc;
+        while((rc=sqlite3_step(s))==SQLITE_ROW && count<capacity)snprintf(ids[count++],128,"%s",sqlite3_column_text(s,0));
+        if(rc!=SQLITE_DONE)count=-1;
+    }
+    sqlite3_finalize(s);pthread_mutex_unlock(&db_lock);return count;
+}

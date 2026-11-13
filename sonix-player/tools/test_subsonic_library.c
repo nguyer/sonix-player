@@ -693,6 +693,88 @@ static void test_deleted_slider_theme(void){
  lv_obj_delete(page);theme_set_dark(dark);
 }
 
+
+static void cleanup_write(const char *path,const void *bytes,size_t size) {
+    FILE *f=fopen(path,"wb");assert(f);assert(fwrite(bytes,1,size,f)==size);assert(fclose(f)==0);
+}
+static void test_connection_cleanup(subsonic_client_t *client,const char *root,const char *local,const char *database,const char *settings,const library_remote_track_t *reference) {
+    char source[33];subsoniccache_source(client,source);
+    char art[640];assert(subsonicart_for_track(reference->path,art,sizeof(art)));
+    subsonic_identity_t identity;assert(subsoniccache_identity(reference->path,&identity));
+    const char *extras[]={".part",".tags.tmp",".identity.tmp",".offline",".temporary"};
+    for(unsigned i=0;i<sizeof(extras)/sizeof(extras[0]);i++) {
+        char side[600];snprintf(side,sizeof(side),"%s%s",reference->path,extras[i]);cleanup_write(side,"extra",5);
+    }
+    char lyric[600],lyric_part[620];
+    const char *extension=strrchr(reference->path,'.');assert(extension);
+    snprintf(lyric,sizeof(lyric),"%.*s.lrc",(int)(extension-reference->path),reference->path);
+    snprintf(lyric_part,sizeof(lyric_part),"%s.part",lyric);
+    cleanup_write(lyric,"words",5);cleanup_write(lyric_part,"partial",7);
+    char obsolete_art[640];snprintf(obsolete_art,sizeof(obsolete_art),"%s/.local/subsonic-art/%s-obsolete.jpg",root,source);
+    cleanup_write(obsolete_art,"old",3);
+    const char *paths[]={reference->path};
+    assert(subsonicoffline_remove(client,root,paths,1,false));wait_offline();
+    assert(access(reference->path,F_OK)!=0 && access(art,F_OK)==0 && access(obsolete_art,F_OK)!=0); // keep shared catalog art, remove orphan art
+    assert(access(lyric,F_OK)!=0 && access(lyric_part,F_OK)!=0);
+    const char *all_side[]={".part",".tags.tmp",".identity.tmp",".offline",".temporary",".tags",".identity"};
+    for(unsigned i=0;i<sizeof(all_side)/sizeof(all_side[0]);i++) {
+        char side[600];snprintf(side,sizeof(side),"%s%s",reference->path,all_side[i]);assert(access(side,F_OK)!=0);
+    }
+    char restored[512];assert(subsoniccache_fetch(client,&reference->song,root,restored,sizeof(restored)));
+    // An owned orphan outside the catalog and an abandoned art write.
+    subsonic_song_t orphan=reference->song;strcpy(orphan.id,"cleanup-orphan");
+    char orphan_path[512];assert(subsoniccache_path(client,&orphan,root,orphan_path,sizeof(orphan_path)));
+    cleanup_write(orphan_path,"owned",5);
+    subsonic_identity_t orphan_identity=identity;strcpy(orphan_identity.song_id,orphan.id);
+    char side[600];snprintf(side,sizeof(side),"%s.identity",orphan_path);cleanup_write(side,&orphan_identity,sizeof(orphan_identity));
+    char orphan_art[640];snprintf(orphan_art,sizeof(orphan_art),"%s/.local/subsonic-art/%s-orphan.jpg.tmp",root,source);cleanup_write(orphan_art,"art",3);
+
+    // A second account's media/art must survive.
+    subsonic_client_t other=*client;strcpy(other.username,"cleanup-other");
+    library_remote_track_t foreign=*reference;strcpy(foreign.song.id,"foreign-cleanup");
+    subsoniccache_source(&other,foreign.source);strcpy(foreign.username,other.username);
+    assert(subsoniccache_path(&other,&foreign.song,root,foreign.path,sizeof(foreign.path)));
+    assert(library_remote_begin(foreign.source) && library_remote_stage(&foreign,1) && library_remote_publish(foreign.source));
+    cleanup_write(foreign.path,"foreign",7);
+    subsonic_identity_t foreign_identity=identity;strcpy(foreign_identity.username,other.username);strcpy(foreign_identity.song_id,foreign.song.id);
+    snprintf(side,sizeof(side),"%s.identity",foreign.path);cleanup_write(side,&foreign_identity,sizeof(foreign_identity));
+    char foreign_art[640];snprintf(foreign_art,sizeof(foreign_art),"%s/.local/subsonic-art/%s-keep.jpg",root,foreign.source);cleanup_write(foreign_art,"keep",4);
+
+    assert(playlists_create("Cleanup server"));
+    assert(playlists_add_track("Cleanup server",reference->path));
+    char backup[640];assert(playlists_backup("Cleanup server",backup,sizeof(backup)));
+    assert(playlists_create("Cleanup local"));
+    assert(playlists_add_track("Cleanup local",local));
+    assert(playlists_add_track("Cleanup local",reference->path));
+    sqlite3 *fixture=NULL;assert(sqlite3_open(database,&fixture)==SQLITE_OK);
+    char *sql=sqlite3_mprintf("INSERT INTO REMOTE_PLAYLISTS VALUES(%Q,'cleanup-playlist','Cleanup server','Cleanup server','Server playlist','');",source);
+    assert(sql && sqlite3_exec(fixture,sql,NULL,NULL,NULL)==SQLITE_OK);sqlite3_free(sql);sqlite3_close(fixture);
+
+    // Ownership mismatch fails safely and leaves the saved login/catalog retryable.
+    subsonic_identity_t wrong=identity;strcpy(wrong.username,"not-this-account");
+    snprintf(side,sizeof(side),"%s.identity",reference->path);cleanup_write(side,&wrong,sizeof(wrong));
+    assert(!subsoniccleanup_connection(client,root));
+    assert(library_remote_count(source)==2);
+    assert(access(reference->path,F_OK)==0 && access(settings,F_OK)==0);
+    cleanup_write(side,&identity,sizeof(identity));
+
+    if(busy)pump_request();
+    account=*client;connected=saved_connection=true;assert(subsonicaccount_save(settings,client));
+    assert(!busy && !subsonicoffline_busy());
+    forget_confirmed(NULL);assert(busy);pump_request();
+    assert(!saved_connection && !account.base_url[0] && library_remote_count(source)==0);
+    assert(library_remote_count(foreign.source)==1 && library_track_count()==2);
+    assert(access(local,F_OK)==0 && access(foreign.path,F_OK)==0 && access(foreign_art,F_OK)==0);
+    assert(access(reference->path,F_OK)!=0 && access(orphan_path,F_OK)!=0 && access(art,F_OK)!=0 && access(orphan_art,F_OK)!=0);
+    assert(!playlists_exists("Cleanup server") && access(backup,F_OK)!=0);
+    assert(playlists_exists("Cleanup local") && library_playlist_count("Cleanup local")==1);
+    library_playlist_link_t *links=NULL;assert(library_playlist_links(source,&links)==0);free(links);
+    subsonic_client_t saved;assert(!subsonicaccount_load(settings,&saved));
+    library_close();assert(library_open(database));
+    assert(library_remote_count(source)==0 && library_remote_count(foreign.source)==1 && library_track_count()==2);
+    assert_albums_populated();
+    puts("Complete connection cleanup and download sidecar tests passed");
+}
 int main(int argc, char **argv) {
 	assert(argc == 3);
 	char settings[512], database[512], account_path[600];
@@ -925,6 +1007,7 @@ int main(int argc, char **argv) {
 	assert(library_open(database));
 	assert(album_group_count() == 3);
 	assert_albums_populated();
+    test_connection_cleanup(&client,argv[1],local,database,settings,&same_name[0]);
 	library_close();
 	assert(subsonicaccount_forget(settings));
 	assert(!subsonicaccount_load(settings, &restored));

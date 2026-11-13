@@ -77,6 +77,8 @@ typedef struct {
 } wave_record_t;
 
 static char cache_path[512];
+static pthread_mutex_t cache_lock=PTHREAD_MUTEX_INITIALIZER;
+static unsigned cache_epoch;
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t wake = PTHREAD_COND_INITIALIZER;
@@ -616,12 +618,16 @@ static void *worker_main(void *arg) {
 		uint64_t key = path_key(path);
 
 		uint8_t bars[WAVEFORM_BARS];
+        pthread_mutex_lock(&cache_lock);
+        unsigned epoch=cache_epoch;
+        bool hot_hit=hot_lookup(key,bars),disk_hit=!hot_hit && cache_lookup(key,bars);
+        if(disk_hit)hot_store(key,bars);
+        pthread_mutex_unlock(&cache_lock);
 		wave_build_t outcome;
-		if (hot_lookup(key, bars)) {
+		if (hot_hit) {
 			outcome = WAVE_BUILD_OK;
-		} else if (cache_lookup(key, bars)) {
+		} else if (disk_hit) {
 			outcome = WAVE_BUILD_OK;
-			hot_store(key, bars);
 			fprintf(stderr, "waveform: '%s' was already worked out\n", path);
 		} else if (!wait_for_quiet(path)) {
 			outcome = WAVE_BUILD_CANCELLED;
@@ -629,8 +635,9 @@ static void *worker_main(void *arg) {
 			long began = now_ms();
 			outcome = build(path, bars);
 			if (outcome == WAVE_BUILD_OK) {
-				cache_store(key, bars);
-				hot_store(key, bars);
+                pthread_mutex_lock(&cache_lock);
+                if(epoch==cache_epoch){cache_store(key,bars);hot_store(key,bars);}
+                pthread_mutex_unlock(&cache_lock);
 				fprintf(stderr, "waveform: '%s' worked out in %ld ms\n", path, now_ms() - began);
 			} else if (outcome == WAVE_BUILD_UNAVAILABLE) {
 				fprintf(stderr, "waveform: nothing to draw for '%s'\n", path);
@@ -752,4 +759,12 @@ void waveform_set_screen_on(bool on) {
 		pthread_cond_signal(&wake);
 	}
 	pthread_mutex_unlock(&lock);
+}
+
+bool waveform_clear_cache(void) {
+    pthread_mutex_lock(&cache_lock);
+    cache_epoch++;memset(hot,0,sizeof(hot));
+    bool ok=!cache_path[0] || unlink(cache_path)==0 || errno==ENOENT;
+    pthread_mutex_unlock(&cache_lock);
+    return ok;
 }

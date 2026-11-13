@@ -2842,3 +2842,15 @@ static void cover_tone_attach(uint64_t id, cover_image_t *img) {
 		cover_tone_store(id, img);
 	}
 }
+
+// Legacy generated keys are content/stat hashes, without account ownership.
+// Reset disposable music images; book covers and all source files are kept.
+bool cover_clear_music_cache(void) {
+    pthread_mutex_lock(&thumb_db_lock);
+    bool ok=!thumb_db || sqlite3_exec(thumb_db,
+        "BEGIN;DELETE FROM thumbs;DELETE FROM player_covers;DELETE FROM player_cover_ids;DELETE FROM cover_colours;COMMIT;",
+        NULL,NULL,NULL)==SQLITE_OK;
+    if(!ok)sqlite3_exec(thumb_db,"ROLLBACK",NULL,NULL,NULL);
+    if(ok && thumb_db)ok=sqlite3_exec(thumb_db,"VACUUM",NULL,NULL,NULL)==SQLITE_OK;
+    pthread_mutex_unlock(&thumb_db_lock);return ok;
+}

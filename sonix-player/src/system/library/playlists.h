@@ -68,6 +68,7 @@ void playlists_free_list(char **list, int count);
 
 // Drops the playlist. Its backup, if it has one, is left alone.
 bool playlists_delete(const char *name);
+bool playlists_remove_backup(const char *name);
 
 // Renames the playlist, which is to say its table. Fails when either name is
 // unusable or when another playlist already answers to the new one; renaming a

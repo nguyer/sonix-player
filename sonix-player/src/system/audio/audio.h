@@ -131,6 +131,7 @@ void audio_set_fade(bool enabled, int seconds);
 void audio_resume();
 
 void audio_stop();
+void audio_unload(void);
 
 audio_status_t audio_get_status(void);
 

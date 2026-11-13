@@ -198,7 +198,12 @@ with tempfile.TemporaryDirectory(prefix="sonix-library-test-") as directory:
     subprocess.run(["objcopy", "--redefine-sym", "main=sonix_simulator_main",
                     "build_host/main.o", str(tmp / "main.o")], cwd=root, check=True)
     objects = sorted(str(p) for p in (root / "build_host").rglob("*")
-                     if p.suffix in (".o", ".opp") and p not in
+                     if p.suffix in (".o", ".opp")
+                     and any(candidate.exists() for candidate in (
+                         root / "src" / p.relative_to(root / "build_host").with_suffix(".c"),
+                         root / "src" / p.relative_to(root / "build_host").with_suffix(".cpp"),
+                         root / p.relative_to(root / "build_host").with_suffix(".c")))
+                     and p not in
                      (root / "build_host/main.o", root / "build_host/gui/streaming/subsonicpage.o"))
     flags = shlex.split(subprocess.check_output(
         ["pkg-config", "--libs", "sdl2", "freetype2", "opusfile", "wavpack"], text=True))

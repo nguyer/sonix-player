@@ -73,4 +73,5 @@ bool waveform_pending(const char *path);
 // All this does is record the state and nudge the worker on the way back.
 void waveform_set_screen_on(bool on);
 
+bool waveform_clear_cache(void);
 #endif // WAVEFORM_H

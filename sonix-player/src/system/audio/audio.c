@@ -4395,6 +4395,13 @@ void audio_stop(void) {
 	playback_wake();
 }
 
+void audio_unload(void) {
+    audio_stop();
+    pthread_mutex_lock(&audio_mutex);
+    play_request=false;restart_fresh_pending=false;current_filepath[0]=0;
+    progress_current_secs=progress_total_secs=0;track_completed=false;
+    pthread_mutex_unlock(&audio_mutex);
+}
 audio_status_t audio_get_status(void) {
 	pthread_mutex_lock(&audio_mutex);
 	audio_status_t status = playback_status;

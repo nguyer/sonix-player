@@ -1655,6 +1655,23 @@ void device_state_seek(double seconds) {
 	audio_seek(seconds);
 }
 
+void device_state_forget_remote(const char *source) {
+    char path[512];library_remote_track_t track;
+    audio_get_current_file(path,sizeof(path));
+    bool owned=library_remote_get(path,&track) && !strcmp(track.source,source);
+    if(!owned)owned=library_remote_get(current_metadata_file,&track) && !strcmp(track.source,source);
+    if(owned) {
+        audio_unload();memset(&current_metadata,0,sizeof(current_metadata));current_metadata_file[0]=0;
+        started_file[0]=0;interrupted_file[0]=0;scrub_cancel();
+    }
+    int count=playlist_count(),removed=0;
+    int *indices=count>0 ? malloc((size_t)count*sizeof(*indices)) : NULL;
+    if(count>0 && !indices){playlist_clear();device_state_queue_changed();return;}
+    for(int i=0;i<count;i++)if(playlist_path_at(i,path,sizeof(path)) &&
+        library_remote_get(path,&track) && !strcmp(track.source,source))indices[removed++]=i;
+    if(removed && playlist_remove(indices,removed))device_state_queue_changed();
+    free(indices);
+}
 void device_state_stop(void) { audio_stop(); }
 
 void device_state_set_volume(long volume) { set_volume(volume); }

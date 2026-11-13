@@ -21,6 +21,7 @@
 #include "src/system/streaming/subsonic.h"
 #include "src/system/streaming/subsoniccache.h"
 #include "src/system/streaming/subsonicaccount.h"
+#include "src/system/streaming/subsoniccleanup.h"
 #include "src/system/streaming/subsoniccatalog.h"
 #include "src/system/streaming/subsonicoffline.h"
 #include "src/system/streaming/subsonicavailability.h"
@@ -77,6 +78,8 @@ typedef struct {
 	bool probe;
     bool prune;
     bool temporary;
+    bool remove_connection;
+    char settings[512];
 	char upload[201];
 	subsonic_song_t song;
 	char root[512], path[512];
@@ -162,7 +165,8 @@ static void *request_worker(void *arg) {
 
  if((r->play || r->sync || r->playlists || r->prune) && atomic_load(&play_cancelled)){
   r->count=-1;snprintf(r->client.error,sizeof(r->client.error),"Sync cancelled.");
- } else r->count = r->probe ? (subsonic_ping(&r->client)?0:-1) : r->prune ? subsoniccatalog_cleanup(&r->client,r->root,&play_cancelled) : r->playlists ? (r->upload[0] ?
+ } else r->count = r->remove_connection ?
+  (subsoniccleanup_connection(&r->client,r->root) && subsonicaccount_forget(r->settings) ? 0 : -1) : r->probe ? (subsonic_ping(&r->client)?0:-1) : r->prune ? subsoniccatalog_cleanup(&r->client,r->root,&play_cancelled) : r->playlists ? (r->upload[0] ?
 		(subsonicplaylists_upload(&r->client,r->upload,&play_cancelled)?0:-1) :
 		(r->background ? subsonicplaylists_sync_pending(&r->client,&play_cancelled) :
 		subsonicplaylists_sync(&r->client,&play_cancelled))) :
@@ -191,6 +195,17 @@ static void consume_result(void) {
 	busy_play = false;
  busy_sync = false;
  topbar_refresh_navidrome();
+ if(r->remove_connection) {
+  if(r->count>=0) {
+   subsonic_forget_server(account.base_url,account.username);
+   subsonic_client_clear(&account);connected=saved_connection=false;
+   server[0]=username[0]=password[0]=waiting_path[0]=0;
+   config_set("subsonic","server","");config_set("subsonic","username","");config_save();
+   snprintf(message,sizeof(message),"Connection and its music, artwork and playlists removed.");
+   player_refresh_now_playing();subsonicpage_downloads_changed();
+  } else gui_notify_popup(r->client.error[0] ? r->client.error : "Could not finish removing the connection. Try again.");
+  subsonic_client_clear(&r->client);free(r);rebuild_home();return;
+ }
  if(r->probe){
   connected=r->count>=0;
   if(!connected)snprintf(message,sizeof(message),"Server unavailable. Downloaded music is still playable.");
@@ -317,7 +332,7 @@ static void start_request(bool login) {
 static void submit_request(request_t *r) {
 	busy = true;
 	busy_play = r->play;
-	busy_sync = r->sync || r->playlists || r->prune;
+	busy_sync = r->sync || r->playlists || r->prune || r->remove_connection;
     topbar_refresh_navidrome();
 	atomic_store(&play_cancelled, false);
 	pthread_t thread;
@@ -442,17 +457,6 @@ static void prepare_waiting(void) {
 
 static void connect_cb(lv_event_t *e) { (void)e; if (!ignore_tap()) start_request(true); }
 
-static void disconnect_cb(lv_event_t *e) {
-	(void)e;
-	if (ignore_tap()) return;
-	subsonicoffline_cancel();
-	connected = false;
-	subsonic_client_clear(&account);
-	clear_password();
-	snprintf(message, sizeof(message), "Disconnected. Enter your password to reconnect.");
-	rebuild_home();
-}
-
 static void sync_cb(lv_event_t *e) {
 	(void)e;
 	if (!ignore_tap()) start_request(false);
@@ -474,25 +478,26 @@ bool subsonicpage_sync_playlists(const char *name) {
 
 
 static void forget_confirmed(void *unused) {
-    (void)unused;
-	if (ignore_tap()) return;
-	if (!subsonicaccount_forget(config_path())) {
-		snprintf(message, sizeof(message), "Could not remove the saved connection."); rebuild_home(); return;
-	}
-	saved_connection = false;
-	subsonic_forget_server(account.base_url,account.username);
-	disconnect_cb(NULL);
-	server[0] = username[0] = 0;
-	config_set("subsonic", "server", ""); config_set("subsonic", "username", ""); config_save();
-	snprintf(message, sizeof(message), "Saved connection forgotten. Library entries and downloaded songs are kept.");
-	rebuild_home();
+ (void)unused;
+ if(ignore_tap() || subsonicoffline_busy())return;
+ const char *root=music_storage_root();
+ if(!root || !*root || library_scan_running()){gui_notify_popup("Music storage is unavailable or the library is scanning. Try again when it finishes.");return;}
+ request_t *r=calloc(1,sizeof(*r));if(!r)return;
+ r->client=account;r->remove_connection=true;
+ snprintf(r->root,sizeof(r->root),"%s",root);
+ const char *settings=config_path();
+ if(!settings || strlen(settings)>=sizeof(r->settings)){free(r);gui_notify_popup("Cannot locate the saved connection.");return;}
+ snprintf(r->settings,sizeof(r->settings),"%s",settings);
+ char source[33];subsoniccache_source(&account,source);
+ waiting_path[0]=0;device_state_forget_remote(source);
+ submit_request(r);
 }
 
 static void forget_cb(lv_event_t *e) {
  (void)e;
  if(ignore_tap() || subsonicoffline_busy())return;
  confirm_show("Remove connection?",
-  "The saved login will be removed. Library entries, playlists and downloaded music stay on this device. Downloaded music remains playable. Server access and synchronization stop until you connect again.",
+  "Remove this connection and all of its music downloads, library entries, cached artwork and server playlists from this device? Local music and local-only playlists are kept. The server itself is unchanged.",
   "Remove",forget_confirmed,NULL);
 }
 
@@ -701,7 +706,6 @@ static void build_home(void) {
 		settingsrow_add(home, "Password", &value, edit_cb, (void *)(intptr_t)2);
 		lv_label_set_text(value, (password[0] || (saved_connection && account.password[0])) ? "••••••••" : "");
 		action_button(home,"Connect",false,connect_cb);
-		settingsrow_heading(home, "Use your server root URL. Connecting saves the account on this device.");
 	}
 
 }

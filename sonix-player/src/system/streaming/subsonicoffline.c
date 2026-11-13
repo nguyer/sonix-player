@@ -1,3 +1,5 @@
+#include "subsonicart.h"
+#include "src/system/library/libraryremote.h"
 #include "subsonicoffline.h"
 #include "subsoniccache.h"
 #include "subsoniccatalog.h"
@@ -182,27 +184,27 @@ bool subsonicoffline_start(const subsonic_client_t *client,const char *root,bool
 typedef struct {job_t job;char (*paths)[512];int count;bool all;} remove_job_t;
 static bool remove_file(job_t *job,const char *path){
  subsonic_identity_t identity;
- if(!subsoniccache_identity(path,&identity))return true; // never infer ownership from a filename
+ if(!subsoniccache_identity(path,&identity)) {
+  library_remote_track_t track;
+  if(!library_remote_get(path,&track) || strcmp(track.source,job->source))return true;
+  snprintf(identity.server,sizeof(identity.server),"%s",track.server);
+  snprintf(identity.username,sizeof(identity.username),"%s",track.username);
+  snprintf(identity.song_id,sizeof(identity.song_id),"%s",track.song.id);
+ }
  if(strcmp(identity.server,job->client.base_url) || strcmp(identity.username,job->client.username))return true;
- offline_file_t file={0};snprintf(file.path,sizeof(file.path),"%s",path);snprintf(file.id,sizeof(file.id),"%s",identity.song_id);
- struct stat st;
- if(lstat(path,&st)==0){
-  if(!owned(job,&file,&st))return false;
-  if(unlink(path)!=0)return false;
- }else if(errno!=ENOENT)return false;
- // The deterministic expected path is checked even when audio is already missing.
- subsonic_song_t song={0};snprintf(song.id,sizeof(song.id),"%s",identity.song_id);
- const char *dot=strrchr(path,'.');if(!dot || strlen(dot+1)>=sizeof(song.suffix))return false;
- strcpy(song.suffix,dot+1);char expected[512];
- if(!subsoniccache_path(&job->client,&song,job->root,expected,sizeof(expected)) || strcmp(expected,path))return false;
- const char *sidecars[]={".offline",".tags",".identity",".temporary"};
- for(int i=0;i<4;++i){char side[560];snprintf(side,sizeof(side),"%s%s",path,sidecars[i]);if(unlink(side)!=0 && errno!=ENOENT)return false;}
- return library_offline_forget(job->source,file.id);
+ return subsoniccache_remove_owned(&job->client,job->root,path,identity.song_id) &&
+  library_offline_forget(job->source,identity.song_id);
 }
 static void *remove_worker(void *arg){
  remove_job_t *r=arg;bool ok=true;
  streamturn_acquire(); // no foreground cache publish can race deletion
  if(r->all){
+  for(int offset=0;;) {
+   library_remote_removed_t rows[32];int n=library_remote_files(r->job.source,offset,rows,32);
+   if(n<0){ok=false;break;}
+   for(int i=0;i<n;i++)if(!remove_file(&r->job,rows[i].path))ok=false;
+   offset+=n;if(n<32)break;
+  }
   char directory[560];snprintf(directory,sizeof(directory),"%s/.local/subsonic-cache",r->job.root);
   DIR *dir=opendir(directory);
   if(!dir && errno!=ENOENT)ok=false;
@@ -213,6 +215,7 @@ static void *remove_worker(void *arg){
    if(!remove_file(&r->job,path))ok=false;
   }closedir(dir);}
  }else for(int i=0;i<r->count;++i)if(!remove_file(&r->job,r->paths[i]))ok=false;
+ if(!subsonicart_prune(&r->job.client,r->job.root))ok=false;
  streamturn_release();
  message(ok?"Downloads removed.":"Some downloads could not be removed. Try again.");
  pthread_mutex_lock(&status_lock);status.removing=false;pthread_mutex_unlock(&status_lock);

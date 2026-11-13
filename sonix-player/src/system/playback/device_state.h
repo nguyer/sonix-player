@@ -198,6 +198,7 @@ void device_state_scrub_by(double delta);
 void device_state_scrub_commit(void);
 bool device_state_scrub_active(double *position_out);
 void device_state_stop(void);
+void device_state_forget_remote(const char *source);
 
 // Call just before stopping playback because the storage it is reading from is
 // being taken away -- the card removed, or exported to a computer. It notes
