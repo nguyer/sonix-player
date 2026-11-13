@@ -1,3 +1,4 @@
+#include "src/system/core/lang.h"
 #include "subsonicart.h"
 #include "src/system/library/libraryremote.h"
 #include "subsonicoffline.h"
@@ -90,13 +91,13 @@ static void cleanup(job_t *job){
 static long long offline_millis(void){struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return (long long)t.tv_sec*1000+t.tv_nsec/1000000;}
 static void *worker(void *arg){
  job_t *job=arg;bool ok=true;long long began=offline_millis();int cached=0,fetches=0;
- message(job->refresh?"Refreshing Navidrome catalog...":"Checking offline downloads...");
+ message(job->refresh?tr("navidrome_refreshing_navidrome_catalog"):tr("navidrome_checking_offline_downloads"));
  if(job->refresh && subsoniccatalog_sync(&job->client,job->root,&cancelled)<0)ok=false;
  char (*ids)[128]=NULL;int extra_count=0;
  if(ok && job->options.mode==OFFLINE_SELECTIVE)ok=extras(job,&ids,&extra_count);
  if(ok)ok=library_offline_plan(job->source,job->options.mode==OFFLINE_MIRROR,(const char (*)[128])ids,extra_count);
  free(ids);
- if(!ok){message(job->client.error[0]?job->client.error:"Cannot prepare offline sync. Previous downloads were kept.");goto finished;}
+ if(!ok){message(job->client.error[0]?job->client.error:tr("navidrome_cannot_prepare_offline_sync_previous_downloads_were_kept"));goto finished;}
  // Reconcile actual storage before enforcing the budget. Unpinned cached files
  // are promoted only after their size fits, rather than silently exceeding it.
  int total=0;
@@ -107,7 +108,7 @@ static void *worker(void *arg){
    if(files[i].bytes>0){
     struct stat st;bool valid=owned(job,&files[i],&st);
     long long bytes=valid?st.st_size:0;int state=valid?2:0;
-    if((files[i].bytes!=bytes || files[i].status!=state) && !library_offline_note(job->source,files[i].id,bytes,files[i].stamp,state)){ok=false;message("Cannot update offline storage accounting.");break;}
+    if((files[i].bytes!=bytes || files[i].status!=state) && !library_offline_note(job->source,files[i].id,bytes,files[i].stamp,state)){ok=false;message(tr("navidrome_cannot_update_offline_storage_accounting"));break;}
    }
   }
   if(n<20)break;
@@ -118,26 +119,26 @@ static void *worker(void *arg){
  for(int offset=0;ok && !atomic_load(&cancelled);offset+=20){
   offline_file_t files[20];int n=library_offline_files(job->source,offset,files,20);if(n<0){ok=false;break;}
   for(int i=0;ok && i<n && !atomic_load(&cancelled);++i)if(files[i].wanted){
-   if(!files[i].catalog_present){ok=false;message("Catalog changed during offline sync. Try again.");break;}
+   if(!files[i].catalog_present){ok=false;message(tr("navidrome_catalog_changed_during_offline_sync_try_again"));break;}
    struct stat st;bool valid=owned(job,&files[i],&st);
    bool force=valid && files[i].bytes>0 && files[i].remote_bytes>0 && files[i].stamp!=files[i].remote_bytes;
    long long allowance=job->options.max_bytes?job->options.max_bytes-used+files[i].bytes:512LL*1024*1024;
    if((valid && !force && job->options.max_bytes && used-files[i].bytes+st.st_size>job->options.max_bytes) ||
     (!valid && allowance<=0) || (files[i].remote_bytes>0 && (!valid || force) && files[i].remote_bytes>allowance)){
-    message("Offline storage limit reached. Existing downloads were kept.");ok=false;break;
+    message(tr("navidrome_offline_storage_limit_reached_existing_downloads_were_kept"));ok=false;break;
    }
    char marker[560];snprintf(marker,sizeof(marker),"%s.offline",files[i].path);
    if(valid && !force && access(marker,F_OK)==0){
     if((files[i].bytes!=st.st_size || files[i].stamp!=files[i].remote_bytes || files[i].status!=2) &&
-     !library_offline_note(job->source,files[i].id,st.st_size,files[i].remote_bytes,2)){ok=false;message("Cannot record offline download.");break;}
+     !library_offline_note(job->source,files[i].id,st.st_size,files[i].remote_bytes,2)){ok=false;message(tr("navidrome_cannot_record_offline_download"));break;}
     used+=st.st_size-files[i].bytes;++cached;
     pthread_mutex_lock(&status_lock);++status.done;status.bytes=used;pthread_mutex_unlock(&status_lock);
     if(cached%20==0)notify_job();
     continue;
    }
-   library_remote_track_t track;if(!library_remote_get(files[i].path,&track)){ok=false;message("Catalog changed during offline sync. Try again.");break;}
+   library_remote_track_t track;if(!library_remote_get(files[i].path,&track)){ok=false;message(tr("navidrome_catalog_changed_during_offline_sync_try_again"));break;}
    pthread_mutex_lock(&status_lock);snprintf(status.path,sizeof(status.path),"%s",files[i].path);pthread_mutex_unlock(&status_lock);
-   char text[256],path[512];snprintf(text,sizeof(text),"Downloading: %.210s",track.song.title);message(text);
+   char text[256],path[512];snprintf(text,sizeof(text),tr("navidrome_downloading_track"),track.song.title);message(text);
    bool fetched=false;
    while(!fetched && !atomic_load(&cancelled)){
     while(atomic_load(&yielding) && !atomic_load(&cancelled))usleep(100000);
@@ -152,15 +153,15 @@ static void *worker(void *arg){
     if(!fetched && serial==atomic_load(&yield_serial)){ok=false;message(job->client.error);break;}
    }
    if(fetched){
-    if(stat(path,&st)!=0 || !pin(path) || !library_offline_note(job->source,files[i].id,st.st_size,track.song.size_bytes,2)){ok=false;message("Cannot record offline download. Try again.");break;}
+    if(stat(path,&st)!=0 || !pin(path) || !library_offline_note(job->source,files[i].id,st.st_size,track.song.size_bytes,2)){ok=false;message(tr("navidrome_cannot_record_offline_download_try_again"));break;}
     used+=st.st_size-files[i].bytes;
     pthread_mutex_lock(&status_lock);++status.done;status.bytes=used;status.path[0]=0;pthread_mutex_unlock(&status_lock);notify_job();
    }
   }
   if(n<20)break;
  }
- if(atomic_load(&cancelled))message("Offline sync stopped. Completed downloads were kept.");
- else if(ok){library_offline_complete(job->source,time(NULL));message("Offline sync complete.");}
+ if(atomic_load(&cancelled))message(tr("navidrome_offline_sync_stopped_completed_downloads_were_kept"));
+ else if(ok){library_offline_complete(job->source,time(NULL));message(tr("navidrome_offline_sync_complete"));}
 finished:
  fprintf(stderr,"Navidrome offline sync: %d cached, %d fetch/promote operations, %lld ms%s\n",cached,fetches,offline_millis()-began,atomic_load(&cancelled)?" (cancelled)":"");
  subsonic_client_clear(&job->client);free(job);atomic_fetch_add(&revision,1);atomic_store(&running,false);notify_job();return NULL;
@@ -171,10 +172,10 @@ bool subsonicoffline_start(const subsonic_client_t *client,const char *root,bool
  job_t *job=calloc(1,sizeof(*job));if(!job){atomic_store(&running,false);notify_job();return false;}
  job->client=*client;strcpy(job->root,root);subsoniccache_source(client,job->source);job->refresh=refresh;
  if(!library_offline_options(job->source,&job->options) || job->options.mode==OFFLINE_OFF){
-  message("Offline sync is off.");subsonic_client_clear(&job->client);free(job);atomic_store(&running,false);notify_job();return false;
+  message(tr("navidrome_offline_sync_is_off"));subsonic_client_clear(&job->client);free(job);atomic_store(&running,false);notify_job();return false;
  }
  atomic_store(&cancelled,false);atomic_store(&interrupted,false);atomic_store(&yielding,false);
- pthread_mutex_lock(&status_lock);memset(&status,0,sizeof(status));strcpy(status.message,"Starting offline sync...");strcpy(status.source,job->source);pthread_mutex_unlock(&status_lock);
+ pthread_mutex_lock(&status_lock);memset(&status,0,sizeof(status));snprintf(status.message,sizeof(status.message),"%s",tr("navidrome_starting_offline_sync"));strcpy(status.source,job->source);pthread_mutex_unlock(&status_lock);
  pthread_t thread;
  if(pthread_create(&thread,NULL,worker,job)!=0){subsonic_client_clear(&job->client);free(job);atomic_store(&running,false);notify_job();return false;}
  pthread_detach(thread);notify_job();return true;
@@ -216,7 +217,7 @@ static void *remove_worker(void *arg){
  }else for(int i=0;i<r->count;++i)if(!remove_file(&r->job,r->paths[i]))ok=false;
  if(!subsonicart_prune(&r->job.client,r->job.root))ok=false;
  streamturn_release();
- message(ok?"Downloads removed.":"Some downloads could not be removed. Try again.");
+ message(ok?tr("navidrome_downloads_removed"):tr("navidrome_some_downloads_could_not_be_removed_try_again"));
  pthread_mutex_lock(&status_lock);status.removing=false;pthread_mutex_unlock(&status_lock);
  free(r->paths);subsonic_client_clear(&r->job.client);free(r);atomic_fetch_add(&revision,1);atomic_store(&running,false);notify_job();return NULL;
 }
@@ -228,7 +229,7 @@ bool subsonicoffline_remove(const subsonic_client_t *client,const char *root,con
  if(count){r->paths=calloc((size_t)count,sizeof(*r->paths));if(!r->paths)goto failed;
   for(int i=0;i<count;++i){if(!paths[i] || strlen(paths[i])>=512)goto failed;strcpy(r->paths[i],paths[i]);}}
  pthread_mutex_lock(&status_lock);memset(&status,0,sizeof(status));status.removing=true;pthread_mutex_unlock(&status_lock);
- message("Removing downloads...");
+ message(tr("navidrome_removing_downloads"));
  pthread_t thread;if(pthread_create(&thread,NULL,remove_worker,r)!=0)goto failed;
  pthread_detach(thread);notify_job();return true;
 failed:

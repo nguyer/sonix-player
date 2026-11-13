@@ -1,3 +1,4 @@
+#include "src/system/core/lang.h"
 #include "subsoniccleanup.h"
 #include "subsoniccache.h"
 #include "streamturn.h"
@@ -60,7 +61,7 @@ bool subsoniccleanup_connection(subsonic_client_t *c,const char *root) {
     if(!c)return false;
     c->error[0]=0;
     if(!root || !*root || library_scan_running()){
-        snprintf(c->error,sizeof(c->error),"Music storage is unavailable or the library is scanning");return false;
+        snprintf(c->error,sizeof(c->error),"%s",tr("navidrome_music_storage_is_unavailable_or_the_library_is_scanning"));return false;
     }
     char source[33];subsoniccache_source(c,source);
     streamturn_acquire();
@@ -74,6 +75,6 @@ bool subsoniccleanup_connection(subsonic_client_t *c,const char *root) {
     if(ok)ok=cover_clear_music_cache() && waveform_clear_cache();
     if(ok)ok=library_remote_forget(source);
     streamturn_release();
-    if(!ok)snprintf(c->error,sizeof(c->error),"Connection cleanup could not finish. Check storage, then try Remove connection again.");
+    if(!ok)snprintf(c->error,sizeof(c->error),"%s",tr("navidrome_connection_cleanup_could_not_finish_check_storage_then_try_remove"));
     return ok;
 }

@@ -1,3 +1,4 @@
+#include "src/system/core/lang.h"
 #include "subsonicplaylists.h"
 #include "subsonicplaylistapi.h"
 #include "subsoniccache.h"
@@ -19,7 +20,7 @@ static void hash_ids(const char (*ids)[128],int count,char out[33]) { md5_hex(co
 static bool local_snapshot(subsonic_client_t *c,const library_playlist_link_t *link,
 	char (**ids)[128],int *count,unsigned *rev,char hash[33]) {
 	if(!library_playlist_remote_ids(link->source,link->local_name,ids,count,rev))
-		return fail(c,link->local_name,"Contains tracks without IDs from this account, or the library is busy. No changes sent.");
+		return fail(c,link->local_name,tr("navidrome_contains_tracks_without_ids_from_this_account_or_the_library_is_busy"));
 	hash_ids((const char (*)[128])*ids,*count,hash);return true;
 }
 
@@ -28,7 +29,7 @@ static void local_name(const char *desired,const char *id,const char *existing,c
 	while(n && ((unsigned char)desired[n]&0xc0)==0x80)--n;
 	memcpy(out,desired,n);out[n]=0;
 	for(size_t i=0;i<n;++i) if(strchr("/\\:*?\"<>|\r\n",out[i]) || (i==0 && out[i]=='.')) out[i]='_';
-	if(!*out) strcpy(out,"Navidrome playlist");
+	if(!*out) snprintf(out,201,"%.160s",tr("navidrome_navidrome_playlist"));
 	library_playlist_link_t reserved;
 	if((!existing || strcmp(out,existing)) && (library_playlist_exists(out) || library_playlist_link(out,&reserved))) {
 		char hash[33],base[170];md5_hex(id,strlen(id),hash);strcpy(base,out);
@@ -55,14 +56,14 @@ static bool sync_one(subsonic_client_t *c,const subsonic_playlist_t *info,
 		strcpy(link.source,source);local_name(remote.info.name,info->id,NULL,link.local_name);
 		baseline(&link,&remote,remote_hash);
 		ok=library_playlist_remote_replace(&link,NULL,(const char (*)[128])remote.ids,remote.count,revision());
-		if(!ok) fail(c,remote.info.name,"Cannot import playlist. Sync the song catalog first and wait for any library scan to finish.");
+		if(!ok) fail(c,remote.info.name,tr("navidrome_cannot_import_playlist_sync_the_song_catalog_first_and_wait_for_any"));
 	} else {
 		link=*saved;
 		bool remote_changed=strcmp(remote_hash,link.hash) || strcmp(remote.info.name,link.remote_name);
 		bool writable=!strcmp(remote.info.owner,c->username);
 		if(!library_playlist_exists(link.local_name)) {
 			unsigned rev=revision();
-			if(remote_changed || !writable) ok=fail(c,link.local_name,"Deletion conflicts with the server. The server playlist was kept.");
+			if(remote_changed || !writable) ok=fail(c,link.local_name,tr("navidrome_deletion_conflicts_with_the_server_the_server_playlist_was_kept"));
 			else {
 				library_playlist_link_t current;
 				ok=library_playlist_link(link.local_name,&current) && !strcmp(current.id,link.id) &&
@@ -82,9 +83,9 @@ static bool sync_one(subsonic_client_t *c,const subsonic_playlist_t *info,
 						baseline(&link,&remote,hash);
 						ok=library_playlist_remote_replace(&link,old,(const char (*)[128])remote.ids,remote.count,rev);
 					} else {baseline(&link,&remote,hash);ok=library_playlist_link_record(&link,rev);}
-				} else ok=fail(c,link.local_name,"Changed both here and on the server. Both versions were kept; resolve the edits before syncing again.");
+				} else ok=fail(c,link.local_name,tr("navidrome_changed_both_here_and_on_the_server_both_versions_were_kept_resolve"));
 			} else if(ok && local_changed) {
-				if(!writable) ok=fail(c,link.local_name,"This shared playlist is read-only. Local edits were kept.");
+				if(!writable) ok=fail(c,link.local_name,tr("navidrome_this_shared_playlist_is_read_only_local_edits_were_kept"));
 				else if(revision()!=rev) ok=false;
 				else {
 					char id[128];
@@ -103,7 +104,7 @@ static bool sync_one(subsonic_client_t *c,const subsonic_playlist_t *info,
 		}
 	}
 	subsonic_playlist_free(&remote);
-	if(!ok && !c->error[0]) fail(c,info->name,"Playlist changed while syncing or storage is unavailable. Try again.");
+	if(!ok && !c->error[0]) fail(c,info->name,tr("navidrome_playlist_changed_while_syncing_or_storage_is_unavailable_try_again"));
 	return ok;
 }
 
@@ -135,18 +136,18 @@ static int sync_playlists(subsonic_client_t *c,const atomic_bool *cancel,bool pe
 			char (*ids)[128]=NULL,hash[33];int count=0;
 			ok=local_snapshot(c,&links[i],&ids,&count,&rev,hash);free(ids);
 			if(ok && (strcmp(hash,links[i].hash) || strcmp(links[i].local_name,links[i].base_local)))
-				ok=fail(c,links[i].local_name,"Removed on the server but edited locally. The local playlist was kept.");
+				ok=fail(c,links[i].local_name,tr("navidrome_removed_on_the_server_but_edited_locally_the_local_playlist_was_kept"));
 		}
 		if(ok) ok=library_playlist_link_drop(&links[i],true,rev);
   if(!ok && pending_only) {
    all_ok=false;
-   if(!first_error[0])snprintf(first_error,sizeof(first_error),"%s",c->error[0]?c->error:"Playlist changed during sync. Try again.");
+   if(!first_error[0])snprintf(first_error,sizeof(first_error),"%s",c->error[0]?c->error:tr("navidrome_playlist_changed_during_sync_try_again"));
    c->error[0]=0;ok=true;
   }
 	}
 	free(remote);free(links);atomic_store(&syncing,false);
  if(ok && !all_ok){ok=false;snprintf(c->error,sizeof(c->error),"%s",first_error);}
-	if(!ok && !c->error[0]) fail(c,"Playlist sync","Cancelled, library busy, or playlists changed during sync. Completed playlists remain synchronized.");
+	if(!ok && !c->error[0]) fail(c,tr("navidrome_playlist_sync"),tr("navidrome_cancelled_library_busy_or_playlists_changed_during_sync_completed"));
 	return ok?done:-1;
 }
 
@@ -158,7 +159,7 @@ bool subsonicplaylists_upload(subsonic_client_t *c,const char *name,const atomic
 	library_playlist_link_t link={0};
 	if(library_playlist_link(name,&link)) {
 		char source[33];subsoniccache_source(c,source);
-		if(strcmp(source,link.source)) return fail(c,name,"Connect to this playlist's Navidrome account first.");
+		if(strcmp(source,link.source)) return fail(c,name,tr("navidrome_connect_to_this_playlist_s_navidrome_account_first"));
 		return subsonicplaylists_sync(c,cancel)>=0;
 	}
 	atomic_store(&syncing,true);c->error[0]=0;
@@ -178,7 +179,7 @@ bool subsonicplaylists_upload(subsonic_client_t *c,const char *name,const atomic
 		subsonic_playlist_free(&p);
 	}
 	free(existing);
-	if(matched>1)ok=fail(c,name,"More than one identical server playlist exists. Sync from the server before uploading.");
+	if(matched>1)ok=fail(c,name,tr("navidrome_more_than_one_identical_server_playlist_exists_sync_from_the_server"));
 	if(ok && (atomic_load(cancel) || revision()!=rev))ok=false;
 	if(ok && !matched) ok=subsonic_playlist_put(c,NULL,name,(const char (*)[128])ids,count,link.id);
 	if(ok) {
@@ -186,6 +187,6 @@ bool subsonicplaylists_upload(subsonic_client_t *c,const char *name,const atomic
 		ok=library_playlist_link_record(&link,rev);
 	}
 	free(ids);atomic_store(&syncing,false);
-	if(!ok && !c->error[0])fail(c,name,"Upload interrupted. A server copy may exist; refresh or retry to recover it. Local playlist was kept.");
+	if(!ok && !c->error[0])fail(c,name,tr("navidrome_upload_interrupted_a_server_copy_may_exist_refresh_or_retry_to"));
 	return ok;
 }

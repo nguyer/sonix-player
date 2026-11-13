@@ -48,7 +48,7 @@ int main(int argc, char **argv) {
 	assert(!strcmp(songs[0].suffix, "wav"));
 	char path[512], again[512];
 	assert(!subsoniccache_fetch(&c, &songs[0], NULL, path, sizeof(path)));
-	assert(strstr(subsonic_last_error(&c), "storage is unavailable"));
+	assert(!strcmp(subsonic_last_error(&c), tr("navidrome_music_storage_is_unavailable")));
 	assert(subsoniccache_fetch(&c, &songs[0], argv[2], path, sizeof(path)));
 	FILE *audio = fopen(path, "rb");
 	assert(audio);
@@ -92,7 +92,7 @@ int main(int argc, char **argv) {
 	subsonic_client_clear(&c);
 	assert(subsonic_client_init(&c, argv[1], "test+user", "wrong-password"));
 	assert(!subsonic_ping(&c));
-	assert(strstr(subsonic_last_error(&c), "username or password"));
+	assert(!strcmp(subsonic_last_error(&c), tr("navidrome_the_server_rejected_the_username_or_password")));
 	subsonic_client_clear(&c);
 	puts("Subsonic real-HTTP tests passed");
 }

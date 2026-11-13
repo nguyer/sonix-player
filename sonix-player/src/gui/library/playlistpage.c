@@ -365,7 +365,7 @@ static void menu_delete_action(void *user) {
 	char message[PLAYLIST_NAME_MAX + 64];
 	snprintf(message, sizeof(message), tr("playlist_will_be_removed_its_backup_stays"), menu_name);
 	library_playlist_link_t link;
-	if(library_playlist_link(menu_name,&link)) snprintf(message,sizeof(message),"This is a Navidrome playlist. Deleting it also queues deletion of its server copy.");
+	if(library_playlist_link(menu_name,&link)) snprintf(message,sizeof(message),"%s",tr("navidrome_this_is_a_navidrome_playlist_deleting_it_also_queues_deletion_of_its"));
 	confirm_show("delete_the_playlist", message, "delete", do_delete, NULL);
 }
 
@@ -420,7 +420,7 @@ static void menu_btn_cb(lv_event_t *e) {
 		{"rename", menu_rename_action, NULL},
 		{"delete", menu_delete_action, NULL},
 		{"playlist_backup", menu_backup_action, NULL},
-		{linked?"Sync with Navidrome":"Upload to Navidrome",menu_navidrome_action,NULL},
+		{linked?tr("navidrome_sync_with_navidrome"):tr("navidrome_upload_to_navidrome"),menu_navidrome_action,NULL},
 	};
 	popover_show(lv_event_get_current_target(e), items, 4);
 }
@@ -612,7 +612,7 @@ static bool collect_row_cb(const char *name, void *user) {
 	bool server_playlist=library_playlist_link(name,&link);
 	if(server_playlist!=collecting_server_playlists)return true;
 	if(!playlist_section_started) {
-		settingsrow_heading(list,server_playlist?"Navidrome playlists":"Local playlists");
+		settingsrow_heading(list,server_playlist?tr("navidrome_navidrome_playlists"):tr("navidrome_local_playlists"));
 		playlist_section_started=true;
 	}
 

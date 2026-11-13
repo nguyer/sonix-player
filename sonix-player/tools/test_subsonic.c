@@ -6,6 +6,10 @@
 #include "src/system/streaming/subsonic.h"
 #include "src/system/net/http.h"
 #include "src/system/core/md5.h"
+#include "src/system/core/lang.h"
+
+// This transport-only test checks message keys; the GUI test loads real catalogs.
+const char *tr(const char *key) { return key; }
 
 static const char *reply = "{\"subsonic-response\":{\"status\":\"ok\"}}";
 static int status = 200, requests;
@@ -62,7 +66,7 @@ int main(void) {
 	assert(subsonic_ping(&c));
 	reply = "{\"subsonic-response\":{\"status\":\"failed\",\"error\":{\"code\":40,\"message\":\"secret\"}}}";
 	assert(!subsonic_ping(&c));
-	assert(strstr(subsonic_last_error(&c), "username or password"));
+	assert(!strcmp(subsonic_last_error(&c), tr("navidrome_the_server_rejected_the_username_or_password")));
 	assert(!strstr(subsonic_last_error(&c), "secret"));
 	reply = "<html>proxy error</html>";
 	assert(!subsonic_ping(&c));

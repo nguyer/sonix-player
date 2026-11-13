@@ -1,3 +1,4 @@
+#include "src/system/core/lang.h"
 #include "subsonicplaylistapi.h"
 #include "subsonicinternal.h"
 #include "src/system/net/http.h"
@@ -15,7 +16,7 @@ static bool info(const json_doc_t *d, int obj, subsonic_playlist_t *p) {
 	return text(d,obj,"id",p->id,sizeof(p->id)) && text(d,obj,"name",p->name,sizeof(p->name)) &&
 		text(d,obj,"owner",p->owner,sizeof(p->owner));
 }
-static bool bad(subsonic_client_t *c) { snprintf(c->error,sizeof(c->error),"Invalid or oversized server playlist."); return false; }
+static bool bad(subsonic_client_t *c) { snprintf(c->error,sizeof(c->error),"%s",tr("navidrome_invalid_or_oversized_server_playlist")); return false; }
 
 int subsonic_playlists(subsonic_client_t *c, subsonic_playlist_t **out) {
 	*out = NULL;

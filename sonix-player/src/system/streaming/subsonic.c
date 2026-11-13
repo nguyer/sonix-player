@@ -1,3 +1,4 @@
+#include "src/system/core/lang.h"
 #include "subsonic.h"
 
 #include <stdio.h>
@@ -93,15 +94,15 @@ const char *subsonic_last_error(const subsonic_client_t *c) { return c->error; }
 bool subsonic_client_init(subsonic_client_t *c, const char *url, const char *user, const char *password) {
 	subsonic_client_clear(c);
 	if (!url || !user || !password || !*user || !*password)
-		return fail(c, "Server, username and password are required.");
+		return fail(c, tr("navidrome_server_username_and_password_are_required"));
 	const char *authority;
 	if (!strncmp(url, "https://", 8)) authority = url + 8;
 	else if (!strncmp(url, "http://", 7)) authority = url + 7;
-	else return fail(c, "Use an http:// or https:// server address.");
+	else return fail(c, tr("navidrome_use_an_http_or_https_server_address"));
 	if (!*authority || *authority == '/' || strpbrk(url, "?#@\r\n\t "))
-		return fail(c, "Use the server root URL without credentials, query or fragment.");
+		return fail(c, tr("navidrome_use_the_server_root_url_without_credentials_query_or_fragment"));
 	if (strlen(url) >= sizeof(c->base_url) || strlen(user) >= sizeof(c->username) ||
-		strlen(password) >= sizeof(c->password)) return fail(c, "Account details are too long.");
+		strlen(password) >= sizeof(c->password)) return fail(c, tr("navidrome_account_details_are_too_long"));
 	strcpy(c->base_url, url);
 	size_t n = strlen(c->base_url);
 	while (n && c->base_url[n - 1] == '/') c->base_url[--n] = 0;
@@ -115,13 +116,13 @@ bool subsonic_client_init(subsonic_client_t *c, const char *url, const char *use
 static bool auth_form(subsonic_client_t *c, const char *params, char *form, size_t size) {
 	c->error[0] = 0;
 	if (!c->base_url[0] || !c->username[0] || !c->password[0])
-		return fail(c, "Configure a Subsonic account first.");
+		return fail(c, tr("navidrome_configure_a_subsonic_account_first"));
 	unsigned char random[16];
 	FILE *rng = fopen("/dev/urandom", "rb");
-	if (!rng) return fail(c, "Cannot generate authentication salt.");
+	if (!rng) return fail(c, tr("navidrome_cannot_generate_authentication_salt"));
 	size_t got = fread(random, 1, sizeof(random), rng);
 	fclose(rng);
-	if (got != sizeof(random)) return fail(c, "Cannot generate authentication salt.");
+	if (got != sizeof(random)) return fail(c, tr("navidrome_cannot_generate_authentication_salt"));
 	char salt[33], token[MD5_HEX_LEN], secret[sizeof(c->password) + 33];
 	for (size_t i = 0; i < sizeof(random); ++i) snprintf(salt + 2 * i, 3, "%02x", random[i]);
 	snprintf(secret, sizeof(secret), "%s%s", c->password, salt);
@@ -132,7 +133,7 @@ static bool auth_form(subsonic_client_t *c, const char *params, char *form, size
 	http_url_encode(c->username, user, sizeof(user));
 	int n = snprintf(form, size, "u=%s&t=%s&s=%s&v=1.16.1&c=SonixPlayer&f=json%s",
 					 user, token, salt, params);
-	if (n < 0 || (size_t)n >= size) return fail(c, "Request is too long.");
+	if (n < 0 || (size_t)n >= size) return fail(c, tr("navidrome_request_is_too_long"));
 	return true;
 }
 
@@ -140,21 +141,21 @@ bool subsonic_api_call(subsonic_client_t *c, const char *method, const char *par
 				 char **body, json_doc_t *doc, int *response) {
 	char url[640];
 	size_t form_size = strlen(params) + 1400;
-	if (form_size > 2 * 1024 * 1024) return fail(c, "Request is too long.");
+	if (form_size > 2 * 1024 * 1024) return fail(c, tr("navidrome_request_is_too_long"));
 	char *form = malloc(form_size);
-	if (!form) return fail(c, "Not enough memory for the request.");
+	if (!form) return fail(c, tr("navidrome_not_enough_memory_for_the_request"));
 	if (!auth_form(c, params, form, form_size)) { free(form); return false; }
 	snprintf(url, sizeof(url), "%s/rest/%s.view", c->base_url, method);
 	http_req_t req = {.method = "POST", .body = form, .want_error_body = true};
 	int status = 0;
 	bool requested = http_request(url, &req, body, NULL, 2 * 1024 * 1024, 15, &status);
 	free(form);
-	if (!requested){note_server(c,false);return fail(c,"Cannot reach the Subsonic server. Check the address and connection.");}
+	if (!requested){note_server(c,false);return fail(c,tr("navidrome_cannot_reach_the_subsonic_server_check_the_address_and_connection"));}
 	note_server(c,status<500 && status!=401 && status!=403);
 	if (!json_parse(*body, doc)) {
 		note_server(c,false);
 		free(*body);
-		return fail(c, "Invalid JSON response from the Subsonic server.");
+		return fail(c, tr("navidrome_invalid_json_response_from_the_subsonic_server"));
 	}
 	*response = json_get(doc, json_root(doc), "subsonic-response");
 	char state[16];
@@ -162,9 +163,9 @@ bool subsonic_api_call(subsonic_client_t *c, const char *method, const char *par
 	if (status == 200 && !strcmp(state, "ok")) return true;
 	// Do not echo arbitrary server messages: a proxy may reflect credentials.
 	long code = json_obj_long(doc, json_get(doc, *response, "error"), "code", 0);
-	if (code == 40 || status == 401) {note_server(c,false);fail(c, "The server rejected the username or password.");}
-	else if (code == 50 || status == 403) fail(c, "This account cannot access the requested resource.");
-	else snprintf(c->error, sizeof(c->error), "Subsonic request failed (HTTP %d, API %ld).", status, code);
+	if (code == 40 || status == 401) {note_server(c,false);fail(c, tr("navidrome_the_server_rejected_the_username_or_password"));}
+	else if (code == 50 || status == 403) fail(c, tr("navidrome_this_account_cannot_access_the_requested_resource"));
+	else snprintf(c->error, sizeof(c->error), tr("navidrome_request_failed"), status, code);
 	json_free(doc);
 	free(*body);
 	return false;
@@ -183,7 +184,7 @@ bool subsonic_ping(subsonic_client_t *c) {
 bool subsonic_cover(subsonic_client_t *c, const char *id, char **data, size_t *size) {
 	*data = NULL;
 	*size = 0;
-	if (!id || !*id || strlen(id) >= 128) return fail(c, "Invalid cover ID.");
+	if (!id || !*id || strlen(id) >= 128) return fail(c, tr("navidrome_invalid_cover_id"));
 	char encoded[384], params[420], form[4096], url[640];
 	http_url_encode(id, encoded, sizeof(encoded));
 	snprintf(params, sizeof(params), "&id=%s&size=512", encoded);
@@ -192,13 +193,13 @@ bool subsonic_cover(subsonic_client_t *c, const char *id, char **data, size_t *s
 	http_req_t req = {.method="POST", .body=form};
 	int status = 0;
 	const size_t limit = 2 * 1024 * 1024;
-	if (!http_request(url, &req, data, size, limit, 15, &status)) return fail(c, "Cannot fetch album artwork.");
+	if (!http_request(url, &req, data, size, limit, 15, &status)) return fail(c, tr("navidrome_cannot_fetch_album_artwork"));
 	bool jpeg = *size >= 4 && !memcmp(*data, "\xff\xd8", 2) && !memcmp(*data + *size - 2, "\xff\xd9", 2);
 	bool png = *size >= 20 && !memcmp(*data, "\x89PNG\r\n\x1a\n", 8) &&
 		!memcmp(*data + *size - 12, "\0\0\0\0IEND", 8);
 	if (status != 200 || *size >= limit || (!jpeg && !png)) {
 		free(*data); *data = NULL; *size = 0;
-		return fail(c, "Server returned invalid or oversized album artwork.");
+		return fail(c, tr("navidrome_server_returned_invalid_or_oversized_album_artwork"));
 	}
 	return true;
 }
@@ -206,7 +207,7 @@ bool subsonic_cover(subsonic_client_t *c, const char *id, char **data, size_t *s
 int subsonic_search_songs(subsonic_client_t *c, const char *query, int offset,
 						 subsonic_song_t *songs, int capacity) {
 	if (!query || strlen(query) > 512 || offset < 0 || !songs || capacity < 1 || capacity > 500) {
-		fail(c, "Invalid song search parameters.");
+		fail(c, tr("navidrome_invalid_song_search_parameters"));
 		return -1;
 	}
 	char encoded[1537], params[1664];
@@ -222,7 +223,7 @@ int subsonic_search_songs(subsonic_client_t *c, const char *query, int offset,
 	int count = json_len(&doc, array);
 	if (result < 0 || doc.toks[result].type != JSON_OBJECT ||
 		(array >= 0 && doc.toks[array].type != JSON_ARRAY) || count > capacity) {
-		fail(c, "Invalid song search response.");
+		fail(c, tr("navidrome_invalid_song_search_response"));
 		count = -1;
 	}
 	for (int i = 0; i < count; ++i) {
@@ -234,7 +235,7 @@ int subsonic_search_songs(subsonic_client_t *c, const char *query, int offset,
 		if (id < 0 || doc.toks[id].type != JSON_STRING ||
 			doc.toks[id].end - doc.toks[id].start >= (int)sizeof(s->id) ||
 			!json_str(&doc, id, s->id, sizeof(s->id)) || !s->id[0]) {
-			fail(c, "Server returned an invalid or oversized song ID.");
+			fail(c, tr("navidrome_server_returned_an_invalid_or_oversized_song_id"));
 			count = -1;
 			break;
 		}
@@ -268,7 +269,7 @@ bool subsonic_download(subsonic_client_t *c,const char *id,const char *path) {
 bool subsonic_download_limited(subsonic_client_t *c,const char *id,const char *path,
  long long allowance,long long reserve,const atomic_bool *cancel) {
 	if (!id || !*id || strlen(id) >= 128 || !path || !*path)
-		return fail(c, "Invalid song download parameters.");
+		return fail(c, tr("navidrome_invalid_song_download_parameters"));
 	char encoded[384], params[400], form[4096], url[640];
 	http_url_encode(id, encoded, sizeof(encoded));
 	snprintf(params, sizeof(params), "&id=%s", encoded);
@@ -277,7 +278,7 @@ bool subsonic_download_limited(subsonic_client_t *c,const char *id,const char *p
 	pthread_mutex_lock(&transfer_lock);
 	if (transfer_busy) {
 		pthread_mutex_unlock(&transfer_lock);
-		return fail(c, "Another song download is still running.");
+		return fail(c, tr("navidrome_another_song_download_is_still_running"));
 	}
 	transfer_busy = true;
 	transfer_cancelled = false;
@@ -286,7 +287,7 @@ bool subsonic_download_limited(subsonic_client_t *c,const char *id,const char *p
 	if (!http_stream_post_open(&stream, url, form, 15)) {
 		note_server(c,false);
 		transfer_end(&stream);
-		return fail(c, "Cannot download the song. Check access and use the final server URL without redirects.");
+		return fail(c, tr("navidrome_cannot_download_the_song_check_access_and_use_the_final_server_url"));
 	}
 	note_server(c,true);
 	pthread_mutex_lock(&transfer_lock);
@@ -298,25 +299,25 @@ bool subsonic_download_limited(subsonic_client_t *c,const char *id,const char *p
 		!strncasecmp(stream.content_type, "application/ogg", 15) ||
 		!strncasecmp(stream.content_type, "application/octet-stream", 24);
  long long budget=allowance;
- if(cancel && atomic_load(cancel)){transfer_end(&stream);return fail(c,"Download interrupted.");}
+ if(cancel && atomic_load(cancel)){transfer_end(&stream);return fail(c,tr("navidrome_download_interrupted"));}
  char parent[600];snprintf(parent,sizeof(parent),"%s",path);
  char *slash=strrchr(parent,'/');if(slash)*slash=0;else strcpy(parent,".");
  struct statvfs space;
  if(reserve>0){
-  if(statvfs(parent,&space)!=0){transfer_end(&stream);return fail(c,"Cannot check free storage.");}
+  if(statvfs(parent,&space)!=0){transfer_end(&stream);return fail(c,tr("navidrome_cannot_check_free_storage"));}
   long long available=(long long)space.f_bavail*(long long)space.f_frsize-reserve;
   if(available<budget)budget=available;
  }
  const long max_bytes=(long)(budget<512LL*1024*1024?budget:512LL*1024*1024);
- if(max_bytes<=0){transfer_end(&stream);return fail(c,"Offline storage limit or free-space reserve reached.");}
+ if(max_bytes<=0){transfer_end(&stream);return fail(c,tr("navidrome_offline_storage_limit_or_free_space_reserve_reached"));}
 	if (cancelled || !audio || stream.content_length < 0 || stream.content_length > max_bytes) {
 		transfer_end(&stream);
-		return fail(c, "Song exceeds the download/storage limit, or the server returned an error.");
+		return fail(c, tr("navidrome_song_exceeds_the_download_storage_limit_or_the_server_returned_an"));
 	}
 	int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
-	if (fd < 0) { transfer_end(&stream); return fail(c, "Cannot create the song cache file."); }
+	if (fd < 0) { transfer_end(&stream); return fail(c, tr("navidrome_cannot_create_the_song_cache_file")); }
 	FILE *file = fdopen(fd, "wb");
-	if (!file) { close(fd); unlink(path); transfer_end(&stream); return fail(c, "Cannot open the song cache file."); }
+	if (!file) { close(fd); unlink(path); transfer_end(&stream); return fail(c, tr("navidrome_cannot_open_the_song_cache_file")); }
 	char buffer[16384];
 	long total = 0;
 	bool ok = true;
@@ -344,7 +345,7 @@ bool subsonic_download_limited(subsonic_client_t *c,const char *id,const char *p
 	if (transfer_cancelled) ok = false;
 	pthread_mutex_unlock(&transfer_lock);
 	transfer_end(&stream);
-	if (!ok) { unlink(path); return fail(c, "Song download was interrupted or storage is full. Try again."); }
+	if (!ok) { unlink(path); return fail(c, tr("navidrome_song_download_was_interrupted_or_storage_is_full_try_again")); }
 	return true;
 }
 

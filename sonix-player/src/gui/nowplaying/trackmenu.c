@@ -1861,7 +1861,7 @@ void trackmenu_open(lv_obj_t *anchor) {
  popover_item_t items[6];memcpy(items,podcast?ITEMS_PODCAST:ITEMS,sizeof(ITEMS));
  int n=5;snprintf(download_menu_path,sizeof(download_menu_path),"%s",state.current_file);
  const char *paths[]={download_menu_path};int downloaded=subsonicpage_download_state(paths,1);
- if(downloaded>=0)items[n++]=(popover_item_t){downloaded==1?"Remove download":"Download",download_current_action,NULL};
+ if(downloaded>=0)items[n++]=(popover_item_t){downloaded==1?tr("navidrome_remove_download"):tr("Scarica"),download_current_action,NULL};
  popover_show(anchor,items,n);
 }
 

@@ -3694,7 +3694,7 @@ static void menu_btn_cb(lv_event_t *e) {
 	items[n++] = (popover_item_t){"details", menu_details_action, NULL};
  const char *download_paths[]={menu_path};
  int download_state=(p->playlist[0] || p->filter==LIBRARY_FILTER_ALBUM)?subsonicpage_download_state(download_paths,1):-1;
- if(download_state>=0)items[n++]=(popover_item_t){download_state==1?"Remove download":"Download",menu_download_action,NULL};
+ if(download_state>=0)items[n++]=(popover_item_t){download_state==1?tr("navidrome_remove_download"):tr("Scarica"),menu_download_action,NULL};
 
 	popover_show(button, items, n);
 }

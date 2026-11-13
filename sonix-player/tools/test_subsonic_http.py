@@ -110,7 +110,7 @@ root = Path(__file__).resolve().parents[1]
 with tempfile.TemporaryDirectory(prefix="sonix-http-test-") as directory:
     executable = str(Path(directory) / "test")
     subprocess.run([
-        "cc", "-Wall", "-Wextra", "-Werror", "-g", "-DHOST_BUILD=1", "-I.",
+        "cc", "-Wall", "-Wextra", "-Werror", "-g", "-ffunction-sections", "-Wl,--gc-sections", "-DHOST_BUILD=1", "-I.",
         "tools/test_subsonic_http.c", "src/system/streaming/subsonic.c",
         "src/system/streaming/subsoniccache.c",
         "src/system/core/json.c", "src/system/core/md5.c",

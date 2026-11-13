@@ -1,3 +1,4 @@
+#include "src/system/core/lang.h"
 #include "src/system/library/libraryremote.h"
 #include "subsoniccache.h"
 #include "src/system/core/md5.h"
@@ -71,7 +72,7 @@ static bool cache_fetch(subsonic_client_t *c,const subsonic_song_t *song,
  const char *root,char *path,size_t size,bool offline,int64_t allowance,int64_t reserve,bool force,const atomic_bool *cancel) {
 	c->error[0] = 0;
 	path[0] = 0;
-	if (!root || !*root || !song->id[0]) return fail(c, "Music storage is unavailable.");
+	if (!root || !*root || !song->id[0]) return fail(c, tr("navidrome_music_storage_is_unavailable"));
 	char suffix[sizeof(song->suffix)];
 	snprintf(suffix, sizeof(suffix), "%s", song->suffix);
 	for (char *p = suffix; *p; ++p) *p = (char)tolower((unsigned char)*p);
@@ -79,12 +80,12 @@ static bool cache_fetch(subsonic_client_t *c,const subsonic_song_t *song,
 	bool supported = false;
 	for (size_t i = 0; i < sizeof(formats) / sizeof(formats[0]); ++i)
 		if (!strcmp(suffix, formats[i])) supported = true;
-	if (!supported) return fail(c, "This song's original format is not supported yet.");
+	if (!supported) return fail(c, tr("navidrome_this_song_s_original_format_is_not_supported_yet"));
 	char dir[440];
 	if (snprintf(dir, sizeof(dir), "%s/.local", root) >= (int)sizeof(dir) || !make_dir(dir))
-		return fail(c, "Cannot create the music cache directory.");
+		return fail(c, tr("navidrome_cannot_create_the_music_cache_directory"));
 	if (snprintf(dir, sizeof(dir), "%s/.local/subsonic-cache", root) >= (int)sizeof(dir) || !make_dir(dir))
-		return fail(c, "Cannot create the music cache directory.");
+		return fail(c, tr("navidrome_cannot_create_the_music_cache_directory"));
 	subsonic_identity_t identity = {0};
 	memcpy(identity.magic, "SONIXS1", 8);
 	snprintf(identity.server, sizeof(identity.server), "%s", c->base_url);
@@ -93,7 +94,7 @@ static bool cache_fetch(subsonic_client_t *c,const subsonic_song_t *song,
 	char key[33], target[512], part[544], tags[544], identity_path[544];
 	md5_hex(&identity, sizeof(identity), key);
 	if (snprintf(target, sizeof(target), "%s/%s.%s", dir, key, suffix) >= (int)sizeof(target) || strlen(target) >= size)
-		return fail(c, "Music cache path is too long.");
+		return fail(c, tr("navidrome_music_cache_path_is_too_long"));
 	struct stat st;
 	subsonic_identity_t saved;
 	if (!force && stat(target, &st) == 0 && st.st_size > 0 && subsoniccache_identity(target, &saved) &&
@@ -104,7 +105,7 @@ static bool cache_fetch(subsonic_client_t *c,const subsonic_song_t *song,
 	// Reserve a whole maximum-sized track before writing. No automatic eviction
 	// yet: a sweep must know which files the playback queue still needs.
 	DIR *d = opendir(dir);
-	if (!d) return fail(c, "Cannot read the music cache directory.");
+	if (!d) return fail(c, tr("navidrome_cannot_read_the_music_cache_directory"));
 	long long bytes = 0;
 	struct dirent *entry;
 	while ((entry = readdir(d))) {
@@ -120,7 +121,7 @@ static bool cache_fetch(subsonic_client_t *c,const subsonic_song_t *song,
   if (stat(file, &st) == 0 && S_ISREG(st.st_mode)) bytes += st.st_size;
 	}
 	closedir(d);
- if(!offline && bytes>512LL*1024*1024)return fail(c,"Song cache is full. Remove old cached songs before downloading more.");
+ if(!offline && bytes>512LL*1024*1024)return fail(c,tr("navidrome_song_cache_is_full_remove_old_cached_songs_before_downloading_more"));
  if(offline){if(!subsonic_download_limited(c,song->id,part,allowance,reserve,cancel))return false;}
  else if(!subsonic_download(c,song->id,part))return false;
  char final_tags[544],final_identity[544];
@@ -143,7 +144,7 @@ static bool cache_fetch(subsonic_client_t *c,const subsonic_song_t *song,
 	} else ok = false;
 	if (!ok || rename(tags,final_tags)!=0 || rename(identity_path,final_identity)!=0 || rename(part, target) != 0) {
 		unlink(part); unlink(tags); unlink(identity_path);
-		return fail(c, "Cannot finish saving the downloaded song.");
+		return fail(c, tr("navidrome_cannot_finish_saving_the_downloaded_song"));
 	}
 	strcpy(path, target);
 	return true;

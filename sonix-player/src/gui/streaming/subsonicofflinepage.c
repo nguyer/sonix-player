@@ -1,3 +1,4 @@
+#include "src/system/core/lang.h"
 #include "subsonicofflinepage.h"
 #include "subsonicpage.h"
 #include "src/system/library/libraryoffline.h"
@@ -16,7 +17,7 @@ static subsonic_client_t *client;
 static char source[33];
 static void rebuild(void);
 static bool account_source(void){if(!client || !client->base_url[0])return false;subsoniccache_source(client,source);return true;}
-static void save(offline_options_t *o){if(!library_offline_save_options(source,o))gui_notify_popup("Cannot save offline settings while the library is busy.");rebuild();}
+static void save(offline_options_t *o){if(!library_offline_save_options(source,o))gui_notify_popup(tr("navidrome_cannot_save_offline_settings_while_the_library_is_busy"));rebuild();}
 
 static lv_obj_t *slider_labels[3];
 static const int storage_values[]={1,2,4,8,16,32,64,128,256,0};
@@ -34,12 +35,12 @@ static void toggle_cb(lv_event_t *e){
  lv_obj_t *toggle=lv_event_get_target(e);
  bool enabled=lv_obj_has_state(toggle,LV_STATE_CHECKED);
  o.auto_cache=enabled;
- if(!library_offline_save_options(source,&o))gui_notify_popup("Cannot save offline settings while the library is busy.");
+ if(!library_offline_save_options(source,&o))gui_notify_popup(tr("navidrome_cannot_save_offline_settings_while_the_library_is_busy"));
 }
 static void slider_text(int which,int value){
  char text[64];
- if(which==1){if(storage_values[value])snprintf(text,sizeof(text),"%d GiB",storage_values[value]);else strcpy(text,"Unlimited");}
- else snprintf(text,sizeof(text),"%d MiB",reserve_values[value]);
+ if(which==1){if(storage_values[value])snprintf(text,sizeof(text),tr("navidrome_gib"),storage_values[value]);else snprintf(text,sizeof(text),"%s",tr("navidrome_unlimited"));}
+ else snprintf(text,sizeof(text),tr("navidrome_mib"),reserve_values[value]);
  lv_label_set_text(slider_labels[which],text);
 }
 static void slider_cb(lv_event_t *e){
@@ -52,7 +53,7 @@ static void slider_cb(lv_event_t *e){
  offline_options_t o;if(!library_offline_options(source,&o))return;
  if(which==1)o.max_bytes=(int64_t)storage_values[value]*1024*1024*1024;
  if(which==2)o.reserve_bytes=(int64_t)reserve_values[value]*1024*1024;
- if(!library_offline_save_options(source,&o))gui_notify_popup("Cannot save offline settings while the library is busy.");
+ if(!library_offline_save_options(source,&o))gui_notify_popup(tr("navidrome_cannot_save_offline_settings_while_the_library_is_busy"));
  if(which==1)rebuild();
 }
 static void slider_control(const char *name,int which,int64_t value){
@@ -74,23 +75,23 @@ static void remove_all_cb(lv_event_t *e){(void)e;if(!switcher_back_drag_active()
 static void stop_cb(lv_event_t *e){(void)e;subsonicoffline_cancel();}
 static void build_content(void){
  lv_obj_clean(content);
- if(!account_source()){settingsrow_heading(content,"Connect to Navidrome to configure offline music.");return;}
- offline_options_t o;if(!library_offline_options(source,&o)){settingsrow_heading(content,"Music storage is unavailable.");return;}
+ if(!account_source()){settingsrow_heading(content,tr("navidrome_connect_to_navidrome_to_configure_offline_music"));return;}
+ offline_options_t o;if(!library_offline_options(source,&o)){settingsrow_heading(content,tr("navidrome_music_storage_is_unavailable"));return;}
  subsonic_offline_status_t state;subsonicoffline_status(&state);
- const char *modes[]={"Off","Selective","Full library"};
- lv_obj_t *pills;settingsrow_pills(content,"Offline mode",&pills);
+ const char *modes[]={tr("navidrome_off"),tr("navidrome_selective"),tr("navidrome_full_library")};
+ lv_obj_t *pills;settingsrow_pills(content,tr("navidrome_offline_mode"),&pills);
  for(int i=1;i<3;++i){lv_obj_t *pill=settingsrow_pill_text(pills,modes[i],i,selection_cb);settingsrow_pill_active(pill,o.mode==i);}
- if(o.mode==OFFLINE_SELECTIVE)toggle_control("Automatically cache recently played",o.auto_cache,1);
- slider_control("Maximum offline storage",1,o.max_bytes/(1024LL*1024*1024));
- if(!o.max_bytes)slider_control("Reserve free space",2,o.reserve_bytes/(1024LL*1024));
+ if(o.mode==OFFLINE_SELECTIVE)toggle_control(tr("navidrome_automatically_cache_recently_played"),o.auto_cache,1);
+ slider_control(tr("navidrome_maximum_offline_storage"),1,o.max_bytes/(1024LL*1024*1024));
+ if(!o.max_bytes)slider_control(tr("navidrome_reserve_free_space"),2,o.reserve_bytes/(1024LL*1024));
  lv_obj_t *remove=lv_button_create(content);lv_obj_set_size(remove,LV_PCT(100),64);
  lv_obj_add_style(remove,&theme_style_card,0);
  lv_obj_set_style_bg_color(remove,lv_color_hex(0xc01c28),0);
  lv_obj_set_style_radius(remove,LV_RADIUS_CIRCLE,0);lv_obj_set_style_shadow_width(remove,0,0);
  lv_obj_add_event_cb(remove,remove_all_cb,LV_EVENT_CLICKED,NULL);
- lv_obj_t *label=lv_label_create(remove);lv_label_set_text(label,"Remove all downloads");
+ lv_obj_t *label=lv_label_create(remove);lv_label_set_text(label,tr("navidrome_remove_all_downloads"));
  lv_obj_set_style_text_font(label,&font_ui_24,0);lv_obj_set_style_text_color(label,lv_color_white(),0);lv_obj_center(label);
- if(state.running && !state.removing)settingsrow_action(content,"Stop offline sync",stop_cb,NULL);
+ if(state.running && !state.removing)settingsrow_action(content,tr("navidrome_stop_offline_sync"),stop_cb,NULL);
 }
 static void rebuild(void){
  int y=lv_obj_get_scroll_y(content);
@@ -107,7 +108,7 @@ void subsonicofflinepage_notify(void){
 void subsonicofflinepage_open(void){rebuild();switch_screen(screen);}
 void subsonicofflinepage_init(gui_config_t *cfg,subsonic_client_t *account){
  client=account;
- screen=lv_obj_create(NULL);content=settingsrow_page(screen,cfg,"Offline / cache settings");switcher_attach_back_gesture(screen);lv_obj_add_event_cb(screen,loaded,LV_EVENT_SCREEN_LOADED,NULL);
+ screen=lv_obj_create(NULL);content=settingsrow_page(screen,cfg,tr("navidrome_offline_cache_settings"));switcher_attach_back_gesture(screen);lv_obj_add_event_cb(screen,loaded,LV_EVENT_SCREEN_LOADED,NULL);
 }
 
 void subsonicofflinepage_refresh(void){if(screen && lv_screen_active()==screen)rebuild();}

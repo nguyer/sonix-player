@@ -1,3 +1,4 @@
+#include "src/system/core/lang.h"
 #include "src/gui/library/medialist.h"
 #include "src/gui/shell/topbar.h"
 #include "src/system/net/wifi.h"
@@ -64,7 +65,7 @@ static bool busy_play;
 static bool busy_sync, saved_connection;
 static char waiting_path[512];
 static atomic_bool play_cancelled;
-static char message[256] = "Enter your server and account details.";
+static char message[256];
 static int editing;
 
 // At most one request exists. The worker owns its snapshot until the timer
@@ -166,7 +167,7 @@ static void *request_worker(void *arg) {
 	if (r->play) streamturn_acquire();
 
  if((r->play || r->sync || r->playlists || r->prune) && atomic_load(&play_cancelled)){
-  r->count=-1;snprintf(r->client.error,sizeof(r->client.error),"Sync cancelled.");
+  r->count=-1;snprintf(r->client.error,sizeof(r->client.error),"%s",tr("navidrome_sync_cancelled"));
  } else r->count = r->remove_connection ?
   (subsoniccleanup_connection(&r->client,r->root) && subsonicaccount_forget(r->settings) ? 0 : -1) : r->probe ? (subsonic_ping(&r->client)?0:-1) : r->prune ? subsoniccatalog_cleanup(&r->client,r->root,&play_cancelled) : r->playlists ? (r->upload[0] ?
 		(subsonicplaylists_upload(&r->client,r->upload,&play_cancelled)?0:-1) :
@@ -177,7 +178,7 @@ static void *request_worker(void *arg) {
 		r->login ? (subsonic_ping(&r->client) ? 0 : -1) :
 		-1;
  if(r->play && r->count>=0 && r->temporary && !subsoniccache_mark_temporary(r->path)){
-  r->count=-1;snprintf(r->client.error,sizeof(r->client.error),"Cannot mark the temporary playback download.");
+  r->count=-1;snprintf(r->client.error,sizeof(r->client.error),"%s",tr("navidrome_cannot_mark_the_temporary_playback_download"));
  }
 	if (r->play){streamturn_release();subsonicoffline_yield_end();}
 	pthread_mutex_lock(&result_lock);
@@ -203,21 +204,21 @@ static void consume_result(void) {
    subsonic_client_clear(&account);connected=saved_connection=false;
    server[0]=username[0]=waiting_path[0]=0;clear_password();login_pending=false;
    config_set("subsonic","server","");config_set("subsonic","username","");config_save();
-   snprintf(message,sizeof(message),"Connection and its music, artwork and playlists removed.");
+   snprintf(message,sizeof(message),"%s",tr("navidrome_connection_and_its_music_artwork_and_playlists_removed"));
    player_refresh_now_playing();subsonicpage_downloads_changed();
-  } else gui_notify_popup(r->client.error[0] ? r->client.error : "Could not finish removing the connection. Try again.");
+  } else gui_notify_popup(r->client.error[0] ? r->client.error : tr("navidrome_could_not_finish_removing_the_connection_try_again"));
   subsonic_client_clear(&r->client);free(r);rebuild_home();return;
  }
  if(r->probe){
   connected=r->count>=0;
-  if(!connected)snprintf(message,sizeof(message),"Server unavailable. Downloaded music is still playable.");
+  if(!connected)snprintf(message,sizeof(message),"%s",tr("navidrome_server_unavailable_downloaded_music_is_still_playable"));
   probe_at=time(NULL)+30;subsonic_client_clear(&r->client);free(r);rebuild_home();return;
  }
  if(r->login)probe_at=time(NULL)+30;
  if(r->play && r->path[0])remember_temporary(&r->client,r->root,r->path);
 
  if((r->play || r->sync || r->playlists || r->prune) && atomic_load(&play_cancelled)){
-  r->count=-1;snprintf(r->client.error,sizeof(r->client.error),"Sync cancelled.");
+  r->count=-1;snprintf(r->client.error,sizeof(r->client.error),"%s",tr("navidrome_sync_cancelled"));
  }
 	if (r->count < 0) {
 		snprintf(message, sizeof(message), "%s", subsonic_last_error(&r->client));
@@ -238,22 +239,22 @@ static void consume_result(void) {
 		config_set("subsonic", "username", username);
 		config_save();
 		saved_connection = subsonicaccount_save(config_path(), &account);
-		snprintf(message, sizeof(message), "%s", saved_connection ? "Connected." :
-			"Connected for this session. Could not save the connection; check the settings file location.");
+		snprintf(message, sizeof(message), "%s", saved_connection ? tr("navidrome_connected") :
+			tr("navidrome_connected_for_this_session_could_not_save_the_connection_check_the"));
 	} else if(r->prune) {
         cleanup_retry_at=0;
     } else if(r->playlists) {
 		if(r->background){auto_last_error[0]=0;auto_retry_at=0;}
-		if(r->upload[0]) snprintf(message,sizeof(message),"Playlist synchronized with Navidrome.");
-		else snprintf(message,sizeof(message),"%d Navidrome playlist(s) synchronized.",r->count);
+		if(r->upload[0]) snprintf(message,sizeof(message),"%s",tr("navidrome_playlist_synchronized_with_navidrome"));
+		else snprintf(message,sizeof(message),tr("navidrome_playlists_synced"),r->count);
 	} else if (r->sync) {
-		snprintf(message, sizeof(message), "Synced %d songs and server playlists.", r->count);
+		snprintf(message, sizeof(message), tr("navidrome_catalog_synced"), r->count);
         char source[33];offline_options_t options;subsoniccache_source(&account,source);
         library_offline_complete(source,time(NULL));offline_retry_at=0;
         if(library_offline_options(source,&options) && options.mode!=OFFLINE_OFF) {
             if(subsonicoffline_start(&account,r->root,false))
-                snprintf(message,sizeof(message),"Catalog and playlists synced. Downloading offline music...");
-            else snprintf(message,sizeof(message),"Catalog and playlists synced. Offline downloads are waiting; check offline settings.");
+                snprintf(message,sizeof(message),"%s",tr("navidrome_catalog_and_playlists_synced_downloading_offline_music"));
+            else snprintf(message,sizeof(message),"%s",tr("navidrome_catalog_and_playlists_synced_offline_downloads_are_waiting_check"));
         } else library_reorganize();
 	} else if (r->play) {
         remember_temporary(&r->client,r->root,r->path);
@@ -268,8 +269,8 @@ static void consume_result(void) {
 			}
 			player_refresh_now_playing();
 			if (!r->resume_queue) switch_screen(player_screen);
-			snprintf(message, sizeof(message), "Song ready.");
-		} else snprintf(message, sizeof(message), "Song saved. Select it again to start playback.");
+			snprintf(message,sizeof(message),"%s",tr("navidrome_song_ready"));
+		} else snprintf(message,sizeof(message),"%s",tr("navidrome_song_saved_select_it_again_to_start_playback"));
 	}
 	if(r->play || r->sync || r->prune)subsonicpage_downloads_changed();
 	subsonic_client_clear(&r->client);
@@ -311,7 +312,7 @@ static void maintenance_tick(lv_timer_t *timer){
 
 static void start_request(bool login) {
  if(busy)return;
- if(subsonicoffline_busy()){gui_notify_popup("Stop offline sync before changing the account or catalog.");return;}
+ if(subsonicoffline_busy()){gui_notify_popup(tr("navidrome_stop_offline_sync_before_changing_the_account_or_catalog"));return;}
  request_t *r=calloc(1,sizeof(*r));if(!r)return;
  r->login=login;r->sync=!login;
  if(login) {
@@ -327,7 +328,7 @@ static void start_request(bool login) {
   const char *root=music_storage_root();
   if(!root || !gui_card_available() || strlen(root)>=sizeof(r->root)){
    subsonic_client_clear(&r->client);free(r);
-   gui_notify_popup("Music storage is unavailable.");return;
+   gui_notify_popup(tr("navidrome_music_storage_is_unavailable"));return;
   }
   strcpy(r->root,root);
  }
@@ -347,12 +348,12 @@ static void submit_request(request_t *r) {
 		busy_play = false;
 		busy_sync = false;
 		subsonic_client_clear(&r->client); free(r);
-		snprintf(message, sizeof(message), "Could not start the connection worker.");
+		snprintf(message,sizeof(message),"%s",tr("navidrome_could_not_start_the_connection_worker"));
 	} else {
 		pthread_detach(thread);
-		snprintf(message, sizeof(message), "%s", r->login ? "Connecting..." :
-			r->playlists ? "Synchronizing Navidrome playlists..." :
-			r->sync ? "Syncing catalog, artwork and playlists..." : r->play ? "Downloading song before playback..." : "Working...");
+		snprintf(message, sizeof(message), "%s", r->login ? tr("navidrome_connecting") :
+			r->playlists ? tr("navidrome_synchronizing_navidrome_playlists") :
+			r->sync ? tr("navidrome_syncing_catalog_artwork_and_playlists") : r->play ? tr("navidrome_downloading_song_before_playback") : tr("navidrome_working"));
 	}
 	topbar_refresh_navidrome();
 	rebuild_home();
@@ -445,16 +446,16 @@ static void prepare_waiting(void) {
 	waiting_path[0] = 0;
 	if (!found) return;
 	request_t *r = calloc(1, sizeof(*r));
-	if (!r) { gui_notify_popup("Not enough memory to prepare this song."); return; }
+	if (!r) { gui_notify_popup(tr("navidrome_not_enough_memory_to_prepare_this_song")); return; }
 	r->client = account;
 	if (!r->client.password[0]) subsonicaccount_load(config_path(), &r->client);
 	if (!r->client.password[0] || strcmp(r->client.base_url, remote.server) || strcmp(r->client.username, remote.username)) {
-		gui_notify_popup("Connect to this song's Navidrome account before playing it.");
+		gui_notify_popup(tr("navidrome_connect_to_this_song_s_navidrome_account_before_playing_it"));
 		subsonic_client_clear(&r->client); free(r); return;
 	}
 	const char *root = music_storage_root();
 	if (!root || !gui_card_available() || strlen(root) >= sizeof(r->root)) {
-		gui_notify_popup("Music storage is unavailable."); subsonic_client_clear(&r->client); free(r); return;
+		gui_notify_popup(tr("navidrome_music_storage_is_unavailable")); subsonic_client_clear(&r->client); free(r); return;
 	}
 	r->song = remote.song; r->play = true; r->resume_queue = true;r->temporary=temporary_playback();
 	strcpy(r->root, root);
@@ -478,13 +479,13 @@ static void sync_cb(lv_event_t *e) {
 }
 
 bool subsonicpage_sync_playlists(const char *name) {
-	if(busy) {gui_notify_popup("Navidrome is busy. Try again when it finishes.");return false;}
+	if(busy) {gui_notify_popup(tr("navidrome_navidrome_is_busy_try_again_when_it_finishes"));return false;}
 	request_t *r=calloc(1,sizeof(*r));
 	if(!r)return false;
 	r->client=account;
 	if(!r->client.password[0])subsonicaccount_load(config_path(),&r->client);
 	if(!r->client.password[0]) {
-		gui_notify_popup("Connect to Navidrome first.");subsonic_client_clear(&r->client);free(r);return false;
+		gui_notify_popup(tr("navidrome_connect_to_navidrome_first"));subsonic_client_clear(&r->client);free(r);return false;
 	}
 	r->playlists=true;
 	if(name)snprintf(r->upload,sizeof(r->upload),"%s",name);
@@ -496,12 +497,12 @@ static void forget_confirmed(void *unused) {
  (void)unused;
  if(ignore_tap() || subsonicoffline_busy())return;
  const char *root=music_storage_root();
- if(!root || !*root || library_scan_running()){gui_notify_popup("Music storage is unavailable or the library is scanning. Try again when it finishes.");return;}
+ if(!root || !*root || library_scan_running()){gui_notify_popup(tr("navidrome_music_storage_is_unavailable_or_the_library_is_scanning_try_again"));return;}
  request_t *r=calloc(1,sizeof(*r));if(!r)return;
  r->client=account;r->remove_connection=true;
  snprintf(r->root,sizeof(r->root),"%s",root);
  const char *settings=config_path();
- if(!settings || strlen(settings)>=sizeof(r->settings)){free(r);gui_notify_popup("Cannot locate the saved connection.");return;}
+ if(!settings || strlen(settings)>=sizeof(r->settings)){free(r);gui_notify_popup(tr("navidrome_cannot_locate_the_saved_connection"));return;}
  snprintf(r->settings,sizeof(r->settings),"%s",settings);
  char source[33];subsoniccache_source(&account,source);
  waiting_path[0]=0;device_state_forget_remote(source);
@@ -511,9 +512,9 @@ static void forget_confirmed(void *unused) {
 static void forget_cb(lv_event_t *e) {
  (void)e;
  if(ignore_tap() || subsonicoffline_busy())return;
- confirm_show("Remove connection?",
-  "Remove this connection and all of its music downloads, library entries, cached artwork and server playlists from this device? Local music and local-only playlists are kept. The server itself is unchanged.",
-  "Remove",forget_confirmed,NULL);
+ confirm_show(tr("navidrome_remove_connection_confirm"),
+  tr("navidrome_remove_connection_message"),
+  tr("remove"),forget_confirmed,NULL);
 }
 
 
@@ -554,7 +555,7 @@ bool subsonicpage_download_pending(const char *const *paths,int count,const char
  return false;
 }
 bool subsonicpage_download_paths(const char *const *paths,int count,int kind,const char *group,bool remove){
- if(busy || subsonicoffline_busy()){gui_notify_popup("Wait for the current Navidrome operation to finish.");return false;}
+ if(busy || subsonicoffline_busy()){gui_notify_popup(tr("navidrome_wait_for_the_current_navidrome_operation_to_finish"));return false;}
  if(!subsonicpage_selective() || !paths || count<1)return false;
  char (*ids)[128]=calloc((size_t)count,128);const char **eligible=calloc((size_t)count,sizeof(*eligible));
  if(!ids || !eligible){free(ids);free(eligible);return false;}
@@ -580,30 +581,30 @@ bool subsonicpage_download_paths(const char *const *paths,int count,int kind,con
  }else if(ok){
   if(subsonic_network_available() && subsonic_server_available(account.base_url,account.username))
    ok=root && subsonicoffline_start(&account,root,false);
-  else gui_notify_popup("Selected for download. Sync when the server is available.");
+  else gui_notify_popup(tr("navidrome_selected_for_download_sync_when_the_server_is_available"));
  }
  free(ids);free(eligible);subsonicpage_downloads_changed();
- if(!ok)gui_notify_popup("Could not start this download action. Check storage and offline settings.");
+ if(!ok)gui_notify_popup(tr("navidrome_could_not_start_this_download_action_check_storage_and_offline"));
  return ok;
 }
 static void remove_all_confirmed(void *unused){
  (void)unused;
- if(busy || subsonicoffline_busy()){gui_notify_popup("Wait for the current Navidrome operation to finish.");return;}
+ if(busy || subsonicoffline_busy()){gui_notify_popup(tr("navidrome_wait_for_the_current_navidrome_operation_to_finish"));return;}
  char source[33];subsoniccache_source(&account,source);
  const char *root=music_storage_root();
- if(!account.password[0] || !root || !library_offline_clear(source)){gui_notify_popup("Cannot remove downloads while the library is busy.");return;}
+ if(!account.password[0] || !root || !library_offline_clear(source)){gui_notify_popup(tr("navidrome_cannot_remove_downloads_while_the_library_is_busy"));return;}
  subsonicofflinepage_refresh();
  device_state_t state;device_state_get(&state);
  library_remote_track_t track;
  if(active_remote(state.current_file,&track))device_state_stop();
- if(!subsonicoffline_remove(&account,root,NULL,0,true))gui_notify_popup("Cannot start removing downloads.");
+ if(!subsonicoffline_remove(&account,root,NULL,0,true))gui_notify_popup(tr("navidrome_cannot_start_removing_downloads"));
  subsonicpage_downloads_changed();
 }
 bool subsonicpage_remove_all_downloads(void){
- if(busy || subsonicoffline_busy()){gui_notify_popup("Wait for the current Navidrome operation to finish.");return false;}
- confirm_show("Remove all downloads?",
-  "Remove all downloaded Navidrome music for this connection and reset to Selective mode? Local music and playlists will be kept.",
-  "Remove all",remove_all_confirmed,NULL);
+ if(busy || subsonicoffline_busy()){gui_notify_popup(tr("navidrome_wait_for_the_current_navidrome_operation_to_finish"));return false;}
+ confirm_show(tr("navidrome_remove_all_downloads_confirm"),
+  tr("navidrome_remove_all_downloads_message"),
+  tr("navidrome_remove_all"),remove_all_confirmed,NULL);
  return true;
 }
 
@@ -616,7 +617,7 @@ static void action_button(lv_obj_t *parent,const char *text,bool danger,lv_event
  lv_obj_set_style_radius(button,LV_RADIUS_CIRCLE,0);
  lv_obj_set_style_shadow_width(button,0,0);
  lv_obj_add_event_cb(button,callback,LV_EVENT_CLICKED,NULL);
- lv_obj_t *label=lv_label_create(button);lv_label_set_text(label,text);
+ lv_obj_t *label=lv_label_create(button);lv_label_set_text(label,tr(text));
  lv_obj_set_style_text_font(label,&font_ui_24,0);
  lv_obj_set_style_text_color(label,lv_color_white(),0);lv_obj_center(label);
 }
@@ -647,10 +648,10 @@ static void edit_cb(lv_event_t *e) {
 	if (ignore_tap()) return;
 	editing = (int)(intptr_t)lv_event_get_user_data(e);
     if(editing<0 || editing>2)return;
-	const char *titles[] = {"Server address", "Username", "Password"};
+	const char *titles[] = {tr("navidrome_server_address"), tr("navidrome_username"), tr("password")};
 	const char *values[] = {server, username, password};
 	const int limits[] = {511, 127, 255};
-	lv_label_set_text(edit_title, titles[editing]);
+	lv_label_set_text(edit_title,tr(titles[editing]));
 	lv_textarea_set_max_length(field, limits[editing]);
 	lv_textarea_set_password_mode(field, editing == 2);
 	keyboard_refresh_password(field);
@@ -667,7 +668,7 @@ static void cancel_cb(lv_event_t *e) {
  subsonic_download_cancel();subsonicoffline_cancel();
  char source[33];offline_options_t options;subsoniccache_source(&account,source);
  offline_retry_at=time(NULL)+(library_offline_options(source,&options)?options.interval_minutes*60:60);
- snprintf(message,sizeof(message),"Cancelling sync...");
+ snprintf(message,sizeof(message),"%s",tr("navidrome_cancelling_sync"));
  rebuild_home();
 }
 
@@ -678,7 +679,7 @@ static void automatic_cb(lv_event_t *e){
  char source[33];offline_options_t options;subsoniccache_source(&account,source);
  if(!library_offline_options(source,&options))return;
  options.automatic=lv_obj_has_state(lv_event_get_target(e),LV_STATE_CHECKED);
- if(!library_offline_save_options(source,&options))gui_notify_popup("Cannot save sync settings while the library is busy.");
+ if(!library_offline_save_options(source,&options))gui_notify_popup(tr("navidrome_cannot_save_sync_settings_while_the_library_is_busy"));
  rebuild_home();
 }
 static void charging_cb(lv_event_t *e){
@@ -686,19 +687,19 @@ static void charging_cb(lv_event_t *e){
  char source[33];offline_options_t options;subsoniccache_source(&account,source);
  if(!library_offline_options(source,&options))return;
  options.charging_only=lv_obj_has_state(lv_event_get_target(e),LV_STATE_CHECKED);
- if(!library_offline_save_options(source,&options))gui_notify_popup("Cannot save sync settings while the library is busy.");
+ if(!library_offline_save_options(source,&options))gui_notify_popup(tr("navidrome_cannot_save_sync_settings_while_the_library_is_busy"));
 }
 static void refresh_cb(lv_event_t *e){
  if(!connection_ready())return;
  lv_event_code_t code=lv_event_get_code(e);
  if(code!=LV_EVENT_VALUE_CHANGED && code!=LV_EVENT_RELEASED)return;
  int index=lv_slider_get_value(lv_event_get_target(e));
- char text[64];snprintf(text,sizeof(text),"%d minutes",refresh_minutes[index]);lv_label_set_text(refresh_value,text);
+ char text[64];snprintf(text,sizeof(text),tr("navidrome_minutes"),refresh_minutes[index]);lv_label_set_text(refresh_value,text);
  if(code!=LV_EVENT_RELEASED || switcher_back_drag_active())return;
  char source[33];offline_options_t options;subsoniccache_source(&account,source);
  if(!library_offline_options(source,&options))return;
  options.interval_minutes=refresh_minutes[index];
- if(!library_offline_save_options(source,&options))gui_notify_popup("Cannot save sync settings while the library is busy.");
+ if(!library_offline_save_options(source,&options))gui_notify_popup(tr("navidrome_cannot_save_sync_settings_while_the_library_is_busy"));
 }
 static void control_enabled(lv_obj_t *object,bool enabled) {
  if(enabled)lv_obj_remove_state(object,LV_STATE_DISABLED);else lv_obj_add_state(object,LV_STATE_DISABLED);
@@ -707,36 +708,36 @@ static void control_enabled(lv_obj_t *object,bool enabled) {
 static void sync_controls(bool ready){
  char source[33];offline_options_t options={.interval_minutes=60};subsoniccache_source(&account,source);
  if(ready && !library_offline_options(source,&options))options.automatic=0;
- lv_obj_t *toggle,*row=settingsrow_toggle(home,"Automatic sync",&toggle,automatic_cb);
+ lv_obj_t *toggle,*row=settingsrow_toggle(home,tr("navidrome_automatic_sync"),&toggle,automatic_cb);
  lv_obj_set_style_opa(row,LV_OPA_40,LV_STATE_DISABLED);
  control_enabled(row,ready);
  if(options.automatic)lv_obj_add_state(toggle,LV_STATE_CHECKED);
  if(options.automatic){
-  lv_obj_t *charging;settingsrow_toggle(home,"Only while charging",&charging,charging_cb);
+  lv_obj_t *charging;settingsrow_toggle(home,tr("navidrome_only_while_charging"),&charging,charging_cb);
   if(options.charging_only)lv_obj_add_state(charging,LV_STATE_CHECKED);
-  lv_obj_t *slider;settingsrow_slider(home,"Refresh interval",7,&refresh_value,&slider,NULL);
+  lv_obj_t *slider;settingsrow_slider(home,tr("navidrome_refresh_interval"),7,&refresh_value,&slider,NULL);
   int index=0;for(int i=0;i<7;++i)if(abs(refresh_minutes[i]-options.interval_minutes)<abs(refresh_minutes[index]-options.interval_minutes))index=i;
   lv_slider_set_value(slider,index,LV_ANIM_OFF);
-  char text[64];snprintf(text,sizeof(text),"%d minutes",refresh_minutes[index]);lv_label_set_text(refresh_value,text);
+  char text[64];snprintf(text,sizeof(text),tr("navidrome_minutes"),refresh_minutes[index]);lv_label_set_text(refresh_value,text);
   lv_obj_add_event_cb(slider,refresh_cb,LV_EVENT_ALL,NULL);
  }
 }
 static void build_home(void) {
  lv_obj_clean(home);
  lv_obj_t *value;
- settingsrow_add(home,"Server address",&value,edit_cb,(void *)(intptr_t)0);
- lv_label_set_text(value,server[0] ? server : "Not set");
- settingsrow_add(home,"Username",&value,edit_cb,(void *)(intptr_t)1);
- lv_label_set_text(value,username[0] ? username : "Not set");
- settingsrow_add(home,"Password",&value,edit_cb,(void *)(intptr_t)2);
+ settingsrow_add(home,tr("navidrome_server_address"),&value,edit_cb,(void *)(intptr_t)0);
+ lv_label_set_text(value,server[0] ? server : tr("timeset_not_set"));
+ settingsrow_add(home,tr("navidrome_username"),&value,edit_cb,(void *)(intptr_t)1);
+ lv_label_set_text(value,username[0] ? username : tr("timeset_not_set"));
+ settingsrow_add(home,tr("password"),&value,edit_cb,(void *)(intptr_t)2);
  lv_label_set_text(value,password[0] ? "••••••••" : "");
  bool ready=connection_ready();
  sync_controls(ready);
- lv_obj_t *offline=settingsrow_add(home,"Offline / cache settings",NULL,offline_open_cb,NULL);
+ lv_obj_t *offline=settingsrow_add(home,tr("navidrome_offline_cache_settings"),NULL,offline_open_cb,NULL);
  lv_obj_set_style_opa(offline,LV_OPA_40,LV_STATE_DISABLED);control_enabled(offline,ready);
  subsonic_offline_status_t status;subsonicoffline_status(&status);
  bool syncing=busy_sync || busy_play || (status.running && !status.removing);
- action_button(home,syncing ? "Cancel sync" : "Sync",false,syncing ? cancel_cb : sync_cb);
+ action_button(home,syncing ? tr("navidrome_cancel_sync") : tr("navidrome_sync"),false,syncing ? cancel_cb : sync_cb);
  lv_obj_t *sync=lv_obj_get_child(home,-1);
  bool enabled=(ready || syncing) && !(busy && !syncing) && !status.removing;
  lv_obj_set_style_opa(sync,LV_OPA_40,LV_STATE_DISABLED);control_enabled(sync,enabled);
@@ -754,6 +755,7 @@ static void rebuild_home(void){
 }
 
 void subsonicpage_init(gui_config_t *cfg) {
+ snprintf(message,sizeof(message),"%s",tr("navidrome_enter_your_server_and_account_details"));
  subsonic_set_availability_notify(queue_availability);
  subsonicoffline_set_notify(queue_offline);
  subsonicavailability_set_notify(queue_availability);

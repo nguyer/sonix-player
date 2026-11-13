@@ -402,6 +402,21 @@ static void test_navidrome_controls(subsonic_client_t *client,gui_config_t *cfg)
  connected=false;rebuild_home(); // established connection stays configurable offline
  disabled=find_label(home,"Sync");assert(!lv_obj_has_state(lv_obj_get_parent(disabled),LV_STATE_DISABLED));
  connected=true;rebuild_home();
+ // Switch an already-built page, then rebuild its formatted slider values.
+ assert(lang_set("Español"));
+ assert(find_label(home,"Dirección del servidor"));
+ assert(find_label(home,tr("navidrome_automatic_sync")));
+ assert(!find_label(home,"Automatic sync"));
+ assert(!strcmp(password,client->password));
+ assert(!strcmp(server,client->base_url));
+ rebuild_home();
+ assert(find_label(home,tr("navidrome_offline_cache_settings")));
+ assert(find_label(home,tr("navidrome_sync")));
+ subsonic_client_t invalid;
+ assert(!subsonic_client_init(&invalid,"ftp://invalid","u","p"));
+ assert(!strcmp(invalid.error,tr("navidrome_use_an_http_or_https_server_address")));
+ assert(strcmp(invalid.error,"navidrome_use_an_http_or_https_server_address"));
+ assert(lang_set("English"));rebuild_home();
  assert(!find_label(home,"Search songs") && !find_label(home,"Disconnect"));
  lv_obj_t *label=find_label(home,"Sync");assert(label && lv_obj_check_type(lv_obj_get_parent(label),&lv_button_class));
  assert(!find_label(home,"Remove connection"));
@@ -828,6 +843,8 @@ int main(int argc, char **argv) {
 	snprintf(database, sizeof(database), "%s/library.db", argv[1]);
 	snprintf(account_path, sizeof(account_path), "%s.subsonic-account", settings);
 	assert(config_init(settings));
+	lang_init("../sonix-packer/assets/R1/usr/resource/sonix/language");
+	assert(!strcmp(lang_current(),"English"));
 	subsonic_client_t client, restored;
 	assert(subsonic_client_init(&client, argv[2], "user", "private-password"));
 	assert(subsonicaccount_save(settings, &client));
